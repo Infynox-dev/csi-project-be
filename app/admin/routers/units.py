@@ -1673,6 +1673,59 @@ def _absolute_file_url(base_url: str, object_key: str | None) -> str | None:
     return f"{base_url.rstrip('/')}{relative}"
 
 
+def _format_export_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return format_timestamp_ist(value, fmt="%d-%b-%Y %I:%M %p IST")
+
+
+def _derive_unit_payment_status(
+    payments: list[UnitRegistrationPayment],
+    summary: dict,
+) -> str:
+    approved = [pay for pay in payments if pay.status == PaymentProofStatus.APPROVED]
+    pending = [pay for pay in payments if pay.status == PaymentProofStatus.PENDING]
+    if approved:
+        balance_due = summary.get("balance_due") or 0
+        if balance_due > 0:
+            return "Partial Payment"
+        return "Fully Paid"
+    if pending:
+        return "Pending Review"
+    return "Rejected"
+
+
+def _group_registration_payments_for_export(payments: List[dict]) -> List[dict]:
+    """Group payment rows by unit and season, keeping all proofs together."""
+    grouped: dict[tuple[int, int | None], list[dict]] = {}
+    for payment in payments:
+        key = (payment["registered_user_id"], payment.get("registration_year"))
+        grouped.setdefault(key, []).append(payment)
+
+    unit_groups = sorted(
+        grouped.values(),
+        key=lambda rows: (
+            (rows[0].get("district_name") or "").lower(),
+            (rows[0].get("unit_name") or rows[0].get("username") or "").lower(),
+            rows[0].get("registered_user_id") or 0,
+        ),
+    )
+
+    flattened: List[dict] = []
+    for index, rows in enumerate(unit_groups):
+        rows.sort(key=lambda row: row.get("_submitted_at_sort") or "")
+        submission_count = len(rows)
+        unit_status = rows[0].get("unit_payment_status", "")
+        for proof_index, row in enumerate(rows, start=1):
+            row["proof_sequence"] = proof_index
+            row["submission_count"] = submission_count
+            row["unit_payment_status"] = unit_status
+            flattened.append(row)
+        if index < len(unit_groups) - 1:
+            flattened.append({"_group_separator": True})
+    return flattened
+
+
 async def _load_registration_payments_for_export(
     db: AsyncSession,
     *,
@@ -1695,10 +1748,6 @@ async def _load_registration_payments_for_export(
         .outerjoin(
             UnitRegistrationCycle,
             UnitRegistrationCycle.id == UnitRegistrationPayment.registration_cycle_id,
-        )
-        .order_by(
-            func.lower(func.coalesce(UnitName.name, CustomUser.username)).asc(),
-            UnitRegistrationPayment.submitted_at.asc(),
         )
     )
     if registration_year is not None:
@@ -1729,9 +1778,23 @@ async def _load_registration_payments_for_export(
             cycle_service.recalculate_latest_approved_balance(cycle_row, approved)
         summary_by_cycle[cycle_id] = cycle_service.build_payment_summary(cycle_row, approved)
 
-    return [
+    payments_by_unit_cycle: dict[tuple[int, int | None], list[UnitRegistrationPayment]] = {}
+    for p, u, un, cycle, district_name in rows:
+        cycle_id = cycle.id if cycle else None
+        payments_by_unit_cycle.setdefault((p.registered_user_id, cycle_id), []).append(p)
+
+    unit_status_by_cycle: dict[tuple[int, int | None], str] = {}
+    for (registered_user_id, cycle_id), cycle_payments in payments_by_unit_cycle.items():
+        summary = summary_by_cycle.get(cycle_id, {}) if cycle_id is not None else {}
+        unit_status_by_cycle[(registered_user_id, cycle_id)] = _derive_unit_payment_status(
+            cycle_payments,
+            summary,
+        )
+
+    payment_rows = [
         {
             "id": p.id,
+            "registered_user_id": p.registered_user_id,
             "username": u.username,
             "unit_name": un.name if un else None,
             "district_name": district_name,
@@ -1739,22 +1802,34 @@ async def _load_registration_payments_for_export(
             "total_amount": p.total_amount,
             "balance_amount": p.balance_amount,
             "registration_total_amount": cycle.total_fee_at_submit if cycle else None,
+            "registration_member_count": (
+                summary_by_cycle[cycle.id]["member_count"] if cycle and cycle.id in summary_by_cycle else None
+            ),
             "total_paid": (
                 summary_by_cycle[cycle.id]["total_paid"] if cycle and cycle.id in summary_by_cycle else None
             ),
+            "payment_credit": (
+                summary_by_cycle[cycle.id]["payment_credit"] if cycle and cycle.id in summary_by_cycle else None
+            ),
             "balance_due": (
                 summary_by_cycle[cycle.id]["balance_due"] if cycle and cycle.id in summary_by_cycle else None
+            ),
+            "unit_payment_status": unit_status_by_cycle.get(
+                (p.registered_user_id, cycle.id if cycle else None),
+                p.status.value,
             ),
             "status": p.status.value,
             "rejection_note": p.rejection_note,
             "approved_paid_amount": p.approved_paid_amount,
             "detected_paid_amount": p.detected_paid_amount,
-            "submitted_at": p.submitted_at.isoformat(),
-            "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
+            "submitted_at": _format_export_datetime(p.submitted_at),
+            "reviewed_at": _format_export_datetime(p.reviewed_at),
+            "_submitted_at_sort": p.submitted_at.isoformat(),
             "payment_proof_url": _absolute_file_url(base_url, p.file_path),
         }
         for p, u, un, cycle, district_name in rows
     ]
+    return _group_registration_payments_for_export(payment_rows)
 
 
 @router.get("/registration-payments/export")

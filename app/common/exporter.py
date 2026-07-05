@@ -278,24 +278,39 @@ def create_archived_members_csv(members_data: List[Dict[str, Any]]) -> BytesIO:
 
 
 REGISTRATION_PAYMENT_EXPORT_HEADERS = [
-    "Payment ID",
+    "Registered User ID",
     "Unit Name",
-    "Username",
+    "Registration Number",
     "District",
     "Registration Year",
-    "Status",
+    "Unit Payment Status",
+    "Proof #",
+    "Total Proofs For Unit",
+    "Members Billed",
+    "Registration Total",
+    "Unit Total Paid",
+    "Unit Balance Due",
+    "Unit Prepaid Credit",
+    "Payment ID",
+    "Proof Status",
     "Submitted At",
     "Reviewed At",
-    "Total Amount",
+    "Amount At Submission",
     "Approved Paid Amount",
     "Detected Paid Amount",
-    "Balance Amount",
-    "Registration Total",
-    "Total Paid",
-    "Balance Due",
+    "Balance After Proof",
     "Rejection Note",
     "Payment Proof URL",
 ]
+
+
+def _registration_payment_cell(payment: Dict[str, Any], key: str) -> Any:
+    value = payment.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str) and not value.strip():
+        return ""
+    return value
 
 
 def _registration_payment_export_rows(
@@ -303,24 +318,33 @@ def _registration_payment_export_rows(
 ) -> List[List[Any]]:
     rows: List[List[Any]] = []
     for payment in payments_data:
+        if payment.get("_group_separator"):
+            rows.append([""] * len(REGISTRATION_PAYMENT_EXPORT_HEADERS))
+            continue
         rows.append([
-            payment.get("id", ""),
-            payment.get("unit_name", "") or "",
-            payment.get("username", "") or "",
-            payment.get("district_name", "") or "",
-            payment.get("registration_year", "") or "",
-            payment.get("status", "") or "",
-            payment.get("submitted_at", "") or "",
-            payment.get("reviewed_at", "") or "",
-            payment.get("total_amount", "") if payment.get("total_amount") is not None else "",
-            payment.get("approved_paid_amount", "") if payment.get("approved_paid_amount") is not None else "",
-            payment.get("detected_paid_amount", "") if payment.get("detected_paid_amount") is not None else "",
-            payment.get("balance_amount", "") if payment.get("balance_amount") is not None else "",
-            payment.get("registration_total_amount", "") if payment.get("registration_total_amount") is not None else "",
-            payment.get("total_paid", "") if payment.get("total_paid") is not None else "",
-            payment.get("balance_due", "") if payment.get("balance_due") is not None else "",
-            payment.get("rejection_note", "") or "",
-            payment.get("payment_proof_url", "") or "",
+            _registration_payment_cell(payment, "registered_user_id"),
+            _registration_payment_cell(payment, "unit_name"),
+            _registration_payment_cell(payment, "username"),
+            _registration_payment_cell(payment, "district_name"),
+            _registration_payment_cell(payment, "registration_year"),
+            _registration_payment_cell(payment, "unit_payment_status"),
+            _registration_payment_cell(payment, "proof_sequence"),
+            _registration_payment_cell(payment, "submission_count"),
+            _registration_payment_cell(payment, "registration_member_count"),
+            _registration_payment_cell(payment, "registration_total_amount"),
+            _registration_payment_cell(payment, "total_paid"),
+            _registration_payment_cell(payment, "balance_due"),
+            _registration_payment_cell(payment, "payment_credit"),
+            _registration_payment_cell(payment, "id"),
+            _registration_payment_cell(payment, "status"),
+            _registration_payment_cell(payment, "submitted_at"),
+            _registration_payment_cell(payment, "reviewed_at"),
+            _registration_payment_cell(payment, "total_amount"),
+            _registration_payment_cell(payment, "approved_paid_amount"),
+            _registration_payment_cell(payment, "detected_paid_amount"),
+            _registration_payment_cell(payment, "balance_amount"),
+            _registration_payment_cell(payment, "rejection_note"),
+            _registration_payment_cell(payment, "payment_proof_url"),
         ])
     return rows
 
