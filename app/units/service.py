@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 
 from app.common.datetime_utils import now_ist
+from app.common.phone_utils import phone_lookup_variants
 from app.auth.models import (
     CustomUser,
     UnitDetails,
@@ -400,6 +401,16 @@ async def reject_unit_transfer_request(
 
 
 # Member Info Change Request Functions
+def _phones_differ(current: Optional[str], requested: Optional[str]) -> bool:
+    if not requested:
+        return False
+    if not current:
+        return True
+    current_variants = set(phone_lookup_variants(current))
+    requested_variants = set(phone_lookup_variants(requested))
+    return current_variants.isdisjoint(requested_variants)
+
+
 async def create_member_info_change_request(
     db: AsyncSession,
     user_id: int,
@@ -454,12 +465,14 @@ async def create_member_info_change_request(
         )
     
     # Check if any changes were requested
+    number_changed = _phones_differ(member.number, data.number)
     has_changes = (
         (data.name and data.name != member.name) or
         (data.gender and data.gender != member.gender) or
         (data.dob and data.dob != member.dob) or
         (data.blood_group and data.blood_group != member.blood_group) or
         (data.qualification and data.qualification != member.qualification) or
+        number_changed or
         residence_changed
     )
     
@@ -482,6 +495,8 @@ async def create_member_info_change_request(
         original_blood_group=member.blood_group,
         qualification=data.qualification if data.qualification and data.qualification != member.qualification else None,
         original_qualification=member.qualification,
+        number=data.number if number_changed else None,
+        original_number=member.number,
         residence_location=resolved_residence[0] if residence_changed and resolved_residence else None,
         residence_state_id=resolved_residence[1] if residence_changed and resolved_residence else None,
         residence_city_id=resolved_residence[2] if residence_changed and resolved_residence else None,
@@ -549,6 +564,8 @@ async def approve_member_info_change(
         member.blood_group = change_request.blood_group
     if change_request.qualification:
         member.qualification = change_request.qualification
+    if change_request.number:
+        member.number = change_request.number
     if change_request.residence_location is not None:
         member.residence_location = change_request.residence_location
         member.residence_state_id = change_request.residence_state_id
@@ -612,6 +629,8 @@ async def revert_member_info_change(
         member.blood_group = change_request.original_blood_group
     if change_request.original_qualification is not None:
         member.qualification = change_request.original_qualification
+    if change_request.original_number is not None:
+        member.number = change_request.original_number
     if change_request.original_residence_location is not None or change_request.residence_location is not None:
         member.residence_location = change_request.original_residence_location
         member.residence_state_id = change_request.original_residence_state_id
@@ -2201,6 +2220,7 @@ async def get_unit_my_requests(
                     "dob": dob.isoformat() if hasattr(dob, "isoformat") else dob,
                     "bloodGroup": req.get("blood_group"),
                     "qualification": req.get("qualification"),
+                    "number": req.get("number"),
                     "residenceLocation": (
                         req.get("residence_location").value
                         if hasattr(req.get("residence_location"), "value")

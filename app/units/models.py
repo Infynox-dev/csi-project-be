@@ -154,6 +154,7 @@ class UnitMemberChangeRequest(Base):
     dob: Mapped[Optional[date]] = mapped_column(Date)
     blood_group: Mapped[Optional[str]] = mapped_column(String(10))
     qualification: Mapped[Optional[str]] = mapped_column(String(255))
+    number: Mapped[Optional[str]] = mapped_column(String(30))
     residence_location: Mapped[Optional[ResidenceLocation]] = mapped_column(
         Enum(ResidenceLocation),
         nullable=True,
@@ -171,6 +172,7 @@ class UnitMemberChangeRequest(Base):
     original_dob: Mapped[Optional[date]] = mapped_column(Date)
     original_blood_group: Mapped[Optional[str]] = mapped_column(String(10))
     original_qualification: Mapped[Optional[str]] = mapped_column(String(255))
+    original_number: Mapped[Optional[str]] = mapped_column(String(30))
     original_residence_location: Mapped[Optional[ResidenceLocation]] = mapped_column(
         Enum(ResidenceLocation),
         nullable=True,

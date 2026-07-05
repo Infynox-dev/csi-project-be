@@ -216,6 +216,7 @@ class UnitMemberChangeRequestCreate(UnitMemberChangeRequestBase):
     dob: Optional[date] = None
     blood_group: Optional[str] = Field(None, max_length=10)
     qualification: Optional[str] = Field(None, max_length=255)
+    number: Optional[str] = Field(None, max_length=30)
     residence_location: Optional[ResidenceLocation] = None
     residence_state_id: Optional[int] = None
     residence_city_id: Optional[int] = None
@@ -225,6 +226,13 @@ class UnitMemberChangeRequestCreate(UnitMemberChangeRequestBase):
     @classmethod
     def normalize_gender(cls, v: Optional[str]) -> Optional[str]:
         return validate_member_gender(v)
+
+    @field_validator("number", mode="before")
+    @classmethod
+    def normalize_number(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return None
+        return validate_and_normalize_phone(str(v))
     
     @field_validator("proof")
     @classmethod
@@ -258,6 +266,7 @@ class UnitMemberChangeRequestResponse(BaseModel):
     dob: Optional[date]
     blood_group: Optional[str]
     qualification: Optional[str]
+    number: Optional[str]
     residence_location: Optional[ResidenceLocation] = None
     residence_state_id: Optional[int] = None
     residence_city_id: Optional[int] = None
@@ -266,6 +275,7 @@ class UnitMemberChangeRequestResponse(BaseModel):
     original_dob: Optional[date]
     original_blood_group: Optional[str]
     original_qualification: Optional[str]
+    original_number: Optional[str]
     original_residence_location: Optional[ResidenceLocation] = None
     original_residence_state_id: Optional[int] = None
     original_residence_city_id: Optional[int] = None
