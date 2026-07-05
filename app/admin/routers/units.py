@@ -59,6 +59,7 @@ from app.common.exporter import (
     create_archived_members_csv,
     create_archived_members_excel,
     create_councilors_excel,
+    create_district_payment_summary_excel,
     create_members_excel,
     create_officials_excel,
     create_registration_payments_csv,
@@ -1830,6 +1831,89 @@ async def _load_registration_payments_for_export(
         for p, u, un, cycle, district_name in rows
     ]
     return _group_registration_payments_for_export(payment_rows)
+
+
+async def _load_district_payment_summary_for_export(
+    db: AsyncSession,
+    *,
+    registration_year: int,
+) -> List[dict]:
+    """Aggregate registration payment totals by district for the summary report."""
+    districts_result = await db.execute(select(ClergyDistrict).order_by(ClergyDistrict.name))
+    districts = list(districts_result.scalars().all())
+
+    summary_by_district: dict[int, dict] = {
+        district.id: {
+            "district_name": district.name,
+            "amount_to_be_paid": 0,
+            "total_amount_paid": 0,
+            "balance_excess": 0,
+            "started": 0,
+            "payment_done": 0,
+        }
+        for district in districts
+    }
+
+    cycles_stmt = (
+        select(UnitRegistrationCycle, UnitName.clergy_district_id)
+        .join(CustomUser, CustomUser.id == UnitRegistrationCycle.registered_user_id)
+        .join(UnitName, UnitName.id == CustomUser.unit_name_id)
+        .where(
+            UnitRegistrationCycle.registration_year == registration_year,
+            CustomUser.user_type == UserType.UNIT,
+            UnitRegistrationCycle.total_fee_at_submit.is_not(None),
+        )
+    )
+    cycle_rows = (await db.execute(cycles_stmt)).all()
+    cycle_ids = [cycle.id for cycle, _ in cycle_rows]
+    payments_by_cycle = await cycle_service.get_payments_by_cycle_ids(db, cycle_ids)
+
+    for cycle, district_id in cycle_rows:
+        if district_id not in summary_by_district:
+            continue
+
+        approved = [
+            payment
+            for payment in payments_by_cycle.get(cycle.id, [])
+            if payment.status == PaymentProofStatus.APPROVED
+        ]
+        payment_summary = cycle_service.build_payment_summary(cycle, approved)
+        district_summary = summary_by_district[district_id]
+        district_summary["amount_to_be_paid"] += payment_summary["fee_owed"]
+        district_summary["total_amount_paid"] += payment_summary["total_paid"]
+        district_summary["balance_excess"] += payment_summary["payment_credit"]
+        district_summary["started"] += 1
+        if payment_summary["is_fully_paid"]:
+            district_summary["payment_done"] += 1
+
+    return [summary_by_district[district.id] for district in districts]
+
+
+@router.get("/registration-payments/summary/export")
+async def export_district_payment_summary(
+    registration_year: Optional[int] = Query(None, description="Filter by registration year"),
+    current_user: CustomUser = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Export district-wise registration payment summary to Excel."""
+    if registration_year is None:
+        registration_year = await cycle_service.get_current_registration_year(db)
+
+    rows = await _load_district_payment_summary_for_export(
+        db,
+        registration_year=registration_year,
+    )
+    export_file = create_district_payment_summary_excel(
+        rows,
+        registration_year=registration_year,
+    )
+    filename = f"district_payment_summary_{registration_year}.xlsx"
+
+    return StreamingResponse(
+        export_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/registration-payments/export")

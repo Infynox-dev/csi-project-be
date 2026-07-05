@@ -4,7 +4,7 @@ from typing import Iterable, Sequence, List, Dict, Any
 from io import BytesIO, StringIO
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.common.config import get_settings
@@ -358,6 +358,155 @@ def create_registration_payments_csv(payments_data: List[Dict[str, Any]]) -> Byt
     csv_bytes = BytesIO(buffer.getvalue().encode("utf-8-sig"))
     csv_bytes.seek(0)
     return csv_bytes
+
+
+def create_district_payment_summary_excel(
+    rows: List[Dict[str, Any]],
+    *,
+    registration_year: int,
+    sheet_title: str = "Payment Summary",
+) -> BytesIO:
+    """Create a district-wise payment summary workbook matching the MKD report layout."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title[:31]
+
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+    currency_format = '"₹"#,##0.00'
+    purple_fill = PatternFill("solid", fgColor="7030A0")
+    blue_fill = PatternFill("solid", fgColor="B4C6E7")
+    orange_fill = PatternFill("solid", fgColor="F8CBAD")
+    green_fill = PatternFill("solid", fgColor="C6EFCE")
+    total_fill = PatternFill("solid", fgColor="FFC7CE")
+    white_font = Font(color="FFFFFF", bold=True)
+    bold_font = Font(bold=True)
+
+    ws.merge_cells("A1:H1")
+    title_cell = ws["A1"]
+    title_cell.value = f"MKD YOUTH MOVEMENT ONLINE REGISTRATION {registration_year - 1}-{registration_year}"
+    title_cell.font = Font(bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("A2:E2")
+    summary_title = ws["A2"]
+    summary_title.value = "PAYMENT SUMMARY"
+    summary_title.fill = purple_fill
+    summary_title.font = white_font
+    summary_title.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("G2:H2")
+    progress_title = ws["G2"]
+    progress_title.value = "REGISTRATION PROGRESS"
+    progress_title.fill = orange_fill
+    progress_title.font = bold_font
+    progress_title.alignment = Alignment(horizontal="center", vertical="center")
+    ws["F2"].border = thin_border
+
+    headers = [
+        ("A3", "SL NO"),
+        ("B3", "DISTRICTS"),
+        ("C3", "AMOUNT TO BE PAID"),
+        ("D3", "TOTAL AMOUNT PAID"),
+        ("E3", "BALANCE IN RETURN IF EXCESS"),
+        ("G3", "STARTED"),
+        ("H3", "ONLINE PAYMENT DONE"),
+    ]
+    for cell_ref, label in headers:
+        cell = ws[cell_ref]
+        cell.value = label
+        cell.font = bold_font
+        cell.fill = blue_fill if cell_ref != "G3" and cell_ref != "H3" else orange_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    ws["F3"].border = thin_border
+
+    totals = {
+        "amount_to_be_paid": 0,
+        "total_amount_paid": 0,
+        "balance_excess": 0,
+        "started": 0,
+        "payment_done": 0,
+    }
+
+    row_num = 4
+    for index, row in enumerate(rows, start=1):
+        amount_due = row.get("amount_to_be_paid") or 0
+        amount_paid = row.get("total_amount_paid") or 0
+        balance_excess = row.get("balance_excess") or 0
+        started = row.get("started") or 0
+        payment_done = row.get("payment_done") or 0
+
+        totals["amount_to_be_paid"] += amount_due
+        totals["total_amount_paid"] += amount_paid
+        totals["balance_excess"] += balance_excess
+        totals["started"] += started
+        totals["payment_done"] += payment_done
+
+        values = [
+            (1, index),
+            (2, row.get("district_name", "")),
+            (3, amount_due),
+            (4, amount_paid),
+            (5, balance_excess),
+            (6, ""),
+            (7, started),
+            (8, payment_done),
+        ]
+        for col, value in values:
+            cell = ws.cell(row=row_num, column=col, value=value)
+            cell.border = thin_border
+            if col in (3, 4, 5):
+                cell.number_format = currency_format
+            if col == 5 and balance_excess > 0:
+                cell.fill = green_fill
+            if col in (1, 7, 8):
+                cell.alignment = Alignment(horizontal="center")
+        row_num += 1
+
+    total_row = row_num
+    total_cells = [
+        (1, "TOTAL"),
+        (2, ""),
+        (3, totals["amount_to_be_paid"]),
+        (4, totals["total_amount_paid"]),
+        (5, totals["balance_excess"]),
+        (6, ""),
+        (7, totals["started"]),
+        (8, totals["payment_done"]),
+    ]
+    for col, value in total_cells:
+        cell = ws.cell(row=total_row, column=col, value=value)
+        cell.border = thin_border
+        cell.font = bold_font
+        cell.fill = total_fill
+        if col in (3, 4, 5):
+            cell.number_format = currency_format
+        if col == 5 and totals["balance_excess"] > 0:
+            cell.fill = green_fill
+        if col in (1, 7, 8):
+            cell.alignment = Alignment(horizontal="center")
+
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 18
+    ws.column_dimensions["E"].width = 24
+    ws.column_dimensions["F"].width = 3
+    ws.column_dimensions["G"].width = 12
+    ws.column_dimensions["H"].width = 20
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = 22
+    ws.row_dimensions[3].height = 36
+
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+    return excel_file
 
 
 def create_password_reset_credentials_excel(
