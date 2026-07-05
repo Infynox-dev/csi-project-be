@@ -114,7 +114,7 @@ class RemovedUnitMemberResponse(RemovedUnitMemberBase):
 class MemberRemoveRequest(BaseModel):
     """Admin request to remove an active unit member (not seasonal archival)."""
 
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
     confirm_not_archival: bool = False
 
 
@@ -122,7 +122,7 @@ class BulkMemberRemoveRequest(BaseModel):
     """Admin request to remove multiple active unit members (not seasonal archival)."""
 
     member_ids: List[int] = Field(..., min_length=1)
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
     confirm_not_archival: bool = False
 
 
@@ -145,7 +145,7 @@ class UnitTransferRequestBase(BaseModel):
     
     unit_member_id: int = Field(..., gt=0)
     destination_unit_id: int = Field(..., gt=0)
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
 
 
 class UnitTransferRequestCreate(UnitTransferRequestBase):
@@ -205,7 +205,7 @@ class UnitMemberChangeRequestBase(BaseModel):
     """Base schema for unit member change requests."""
     
     unit_member_id: int = Field(..., gt=0)
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
 
 
 class UnitMemberChangeRequestCreate(UnitMemberChangeRequestBase):
@@ -306,7 +306,7 @@ class UnitOfficialsChangeRequestBase(BaseModel):
     """Base schema for unit officials change requests."""
     
     unit_official_id: int = Field(..., gt=0)
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
 
 
 class UnitOfficialsChangeRequestCreate(UnitOfficialsChangeRequestBase):
@@ -381,7 +381,7 @@ class UnitCouncilorChangeRequestBase(BaseModel):
     """Base schema for unit councilor change requests."""
     
     unit_councilor_id: int = Field(..., gt=0)
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
 
 
 class UnitCouncilorChangeRequestCreate(UnitCouncilorChangeRequestBase):
@@ -463,7 +463,7 @@ class UnitMemberAddRequestBase(BaseModel):
     number: str = Field(..., min_length=1, max_length=30)
     qualification: Optional[str] = Field(None, max_length=255)
     blood_group: str = Field(..., min_length=1, max_length=10)
-    reason: str = Field(..., min_length=10, max_length=5000)
+    reason: str = Field(..., min_length=5, max_length=5000)
     residence_location: ResidenceLocation
     residence_state_id: Optional[int] = None
     residence_city_id: Optional[int] = None
