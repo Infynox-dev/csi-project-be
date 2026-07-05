@@ -401,6 +401,15 @@ async def reject_unit_transfer_request(
 
 
 # Member Info Change Request Functions
+OFFICIAL_IDENTITY_FIELDS = (
+    ("president_name", "president_phone"),
+    ("vice_president_name", "vice_president_phone"),
+    ("secretary_name", "secretary_phone"),
+    ("joint_secretary_name", "joint_secretary_phone"),
+    ("treasurer_name", "treasurer_phone"),
+)
+
+
 def _phones_differ(current: Optional[str], requested: Optional[str]) -> bool:
     if not requested:
         return False
@@ -409,6 +418,57 @@ def _phones_differ(current: Optional[str], requested: Optional[str]) -> bool:
     current_variants = set(phone_lookup_variants(current))
     requested_variants = set(phone_lookup_variants(requested))
     return current_variants.isdisjoint(requested_variants)
+
+
+def _official_matches_member_identity(
+    official_name: Optional[str],
+    official_phone: Optional[str],
+    member_name: str,
+    member_phone: Optional[str],
+) -> bool:
+    if not official_name or not member_name:
+        return False
+    if official_name.strip().upper() != member_name.strip().upper():
+        return False
+    if member_phone and official_phone:
+        return not _phones_differ(official_phone, member_phone)
+    return official_phone == member_phone
+
+
+async def _sync_member_identity_in_officials(
+    db: AsyncSession,
+    registered_user_id: int,
+    previous_name: str,
+    previous_phone: Optional[str],
+    updated_name: str,
+    updated_phone: Optional[str],
+) -> None:
+    """Keep denormalized unit official rows in sync when a member's identity changes."""
+    if (
+        previous_name.strip().upper() == updated_name.strip().upper()
+        and not _phones_differ(previous_phone, updated_phone)
+    ):
+        return
+
+    stmt = select(UnitOfficials).where(UnitOfficials.registered_user_id == registered_user_id)
+    result = await db.execute(stmt)
+    officials = result.scalar_one_or_none()
+    if not officials:
+        return
+
+    normalized_name = updated_name.strip().upper()
+    for name_field, phone_field in OFFICIAL_IDENTITY_FIELDS:
+        current_name = getattr(officials, name_field)
+        current_phone = getattr(officials, phone_field)
+        if _official_matches_member_identity(
+            current_name,
+            current_phone,
+            previous_name,
+            previous_phone,
+        ):
+            setattr(officials, name_field, normalized_name)
+            if updated_phone is not None:
+                setattr(officials, phone_field, updated_phone)
 
 
 async def create_member_info_change_request(
@@ -552,6 +612,9 @@ async def approve_member_info_change(
     stmt = select(UnitMembers).where(UnitMembers.id == change_request.unit_member_id)
     result = await db.execute(stmt)
     member = result.scalar_one()
+
+    previous_name = member.name
+    previous_phone = member.number
     
     # Apply changes
     if change_request.name:
@@ -570,6 +633,16 @@ async def approve_member_info_change(
         member.residence_location = change_request.residence_location
         member.residence_state_id = change_request.residence_state_id
         member.residence_city_id = change_request.residence_city_id
+
+    if change_request.name or change_request.number:
+        await _sync_member_identity_in_officials(
+            db,
+            member.registered_user_id,
+            previous_name,
+            previous_phone,
+            member.name,
+            member.number,
+        )
     
     # Update status
     change_request.status = RequestStatus.APPROVED
@@ -617,6 +690,9 @@ async def revert_member_info_change(
     stmt = select(UnitMembers).where(UnitMembers.id == change_request.unit_member_id)
     result = await db.execute(stmt)
     member = result.scalar_one()
+
+    previous_name = member.name
+    previous_phone = member.number
     
     # Restore original values
     if change_request.original_name is not None:
@@ -635,6 +711,16 @@ async def revert_member_info_change(
         member.residence_location = change_request.original_residence_location
         member.residence_state_id = change_request.original_residence_state_id
         member.residence_city_id = change_request.original_residence_city_id
+
+    if change_request.name or change_request.number:
+        await _sync_member_identity_in_officials(
+            db,
+            member.registered_user_id,
+            previous_name,
+            previous_phone,
+            member.name,
+            member.number,
+        )
     
     # Update status back to pending
     change_request.status = RequestStatus.PENDING
