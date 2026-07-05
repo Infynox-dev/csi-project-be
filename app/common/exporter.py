@@ -277,6 +277,65 @@ def create_archived_members_csv(members_data: List[Dict[str, Any]]) -> BytesIO:
     return csv_bytes
 
 
+REGISTRATION_PAYMENT_EXPORT_HEADERS = [
+    "Payment ID",
+    "Unit Name",
+    "Username",
+    "District",
+    "Registration Year",
+    "Status",
+    "Submitted At",
+    "Reviewed At",
+    "Total Amount",
+    "Approved Paid Amount",
+    "Detected Paid Amount",
+    "Balance Amount",
+    "Registration Total",
+    "Total Paid",
+    "Balance Due",
+    "Rejection Note",
+    "Payment Proof URL",
+]
+
+
+def _registration_payment_export_rows(
+    payments_data: List[Dict[str, Any]],
+) -> List[List[Any]]:
+    rows: List[List[Any]] = []
+    for payment in payments_data:
+        rows.append([
+            payment.get("id", ""),
+            payment.get("unit_name", "") or "",
+            payment.get("username", "") or "",
+            payment.get("district_name", "") or "",
+            payment.get("registration_year", "") or "",
+            payment.get("status", "") or "",
+            payment.get("submitted_at", "") or "",
+            payment.get("reviewed_at", "") or "",
+            payment.get("total_amount", "") if payment.get("total_amount") is not None else "",
+            payment.get("approved_paid_amount", "") if payment.get("approved_paid_amount") is not None else "",
+            payment.get("detected_paid_amount", "") if payment.get("detected_paid_amount") is not None else "",
+            payment.get("balance_amount", "") if payment.get("balance_amount") is not None else "",
+            payment.get("registration_total_amount", "") if payment.get("registration_total_amount") is not None else "",
+            payment.get("total_paid", "") if payment.get("total_paid") is not None else "",
+            payment.get("balance_due", "") if payment.get("balance_due") is not None else "",
+            payment.get("rejection_note", "") or "",
+            payment.get("payment_proof_url", "") or "",
+        ])
+    return rows
+
+
+def create_registration_payments_csv(payments_data: List[Dict[str, Any]]) -> BytesIO:
+    """Create CSV file for unit registration payment submissions."""
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(REGISTRATION_PAYMENT_EXPORT_HEADERS)
+    writer.writerows(_registration_payment_export_rows(payments_data))
+    csv_bytes = BytesIO(buffer.getvalue().encode("utf-8-sig"))
+    csv_bytes.seek(0)
+    return csv_bytes
+
+
 def create_password_reset_credentials_excel(
     reset_users: List[Dict[str, Any]],
     password: str,

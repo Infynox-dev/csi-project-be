@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from typing import List, Optional
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, status, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, status, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,6 +61,7 @@ from app.common.exporter import (
     create_councilors_excel,
     create_members_excel,
     create_officials_excel,
+    create_registration_payments_csv,
     create_units_excel,
 )
 from app.units.member_serialization import (
@@ -1663,6 +1664,128 @@ async def list_registration_payments(
     ]
     set_cache(cache_key, payload, ttl_seconds=TTL_PAYMENTS)
     return payload
+
+
+def _absolute_file_url(base_url: str, object_key: str | None) -> str | None:
+    relative = get_public_file_url(object_key)
+    if not relative:
+        return None
+    return f"{base_url.rstrip('/')}{relative}"
+
+
+async def _load_registration_payments_for_export(
+    db: AsyncSession,
+    *,
+    registration_year: Optional[int] = None,
+    district_id: Optional[int] = None,
+    unit_id: Optional[int] = None,
+    base_url: str = "",
+) -> List[dict]:
+    stmt = (
+        select(
+            UnitRegistrationPayment,
+            CustomUser,
+            UnitName,
+            UnitRegistrationCycle,
+            ClergyDistrict.name.label("district_name"),
+        )
+        .join(CustomUser, CustomUser.id == UnitRegistrationPayment.registered_user_id)
+        .outerjoin(UnitName, UnitName.id == CustomUser.unit_name_id)
+        .outerjoin(ClergyDistrict, ClergyDistrict.id == UnitName.clergy_district_id)
+        .outerjoin(
+            UnitRegistrationCycle,
+            UnitRegistrationCycle.id == UnitRegistrationPayment.registration_cycle_id,
+        )
+        .order_by(
+            func.lower(func.coalesce(UnitName.name, CustomUser.username)).asc(),
+            UnitRegistrationPayment.submitted_at.asc(),
+        )
+    )
+    if registration_year is not None:
+        stmt = stmt.where(UnitRegistrationCycle.registration_year == registration_year)
+    if district_id is not None:
+        stmt = stmt.where(UnitName.clergy_district_id == district_id)
+    if unit_id is not None:
+        stmt = stmt.where(UnitRegistrationPayment.registered_user_id == unit_id)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    cycles_by_id: dict[int, UnitRegistrationCycle] = {}
+    for _, _, _, cycle, _ in rows:
+        if cycle is not None:
+            cycles_by_id[cycle.id] = cycle
+
+    payments_by_cycle = await cycle_service.get_payments_by_cycle_ids(
+        db, list(cycles_by_id.keys())
+    )
+    summary_by_cycle: dict[int, dict] = {}
+    for cycle_id, cycle_row in cycles_by_id.items():
+        cycle_payments = payments_by_cycle.get(cycle_id, [])
+        approved = [
+            pay for pay in cycle_payments if pay.status == PaymentProofStatus.APPROVED
+        ]
+        if approved:
+            cycle_service.recalculate_latest_approved_balance(cycle_row, approved)
+        summary_by_cycle[cycle_id] = cycle_service.build_payment_summary(cycle_row, approved)
+
+    return [
+        {
+            "id": p.id,
+            "username": u.username,
+            "unit_name": un.name if un else None,
+            "district_name": district_name,
+            "registration_year": cycle.registration_year if cycle else None,
+            "total_amount": p.total_amount,
+            "balance_amount": p.balance_amount,
+            "registration_total_amount": cycle.total_fee_at_submit if cycle else None,
+            "total_paid": (
+                summary_by_cycle[cycle.id]["total_paid"] if cycle and cycle.id in summary_by_cycle else None
+            ),
+            "balance_due": (
+                summary_by_cycle[cycle.id]["balance_due"] if cycle and cycle.id in summary_by_cycle else None
+            ),
+            "status": p.status.value,
+            "rejection_note": p.rejection_note,
+            "approved_paid_amount": p.approved_paid_amount,
+            "detected_paid_amount": p.detected_paid_amount,
+            "submitted_at": p.submitted_at.isoformat(),
+            "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
+            "payment_proof_url": _absolute_file_url(base_url, p.file_path),
+        }
+        for p, u, un, cycle, district_name in rows
+    ]
+
+
+@router.get("/registration-payments/export")
+async def export_registration_payments(
+    request: Request,
+    registration_year: Optional[int] = Query(None, description="Filter by registration year"),
+    district_id: Optional[int] = Query(None, description="Filter by clergy district id"),
+    unit_id: Optional[int] = Query(None, description="Filter by registered unit user id"),
+    current_user: CustomUser = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Export unit registration payment submissions to CSV."""
+    rows = await _load_registration_payments_for_export(
+        db,
+        registration_year=registration_year,
+        district_id=district_id,
+        unit_id=unit_id,
+        base_url=str(request.base_url),
+    )
+
+    year_suffix = str(registration_year) if registration_year is not None else "all"
+    district_suffix = str(district_id) if district_id is not None else "all"
+    unit_suffix = str(unit_id) if unit_id is not None else "all"
+    filename = f"registration_payments_{year_suffix}_{district_suffix}_{unit_suffix}.csv"
+    export_file = create_registration_payments_csv(rows)
+
+    return StreamingResponse(
+        export_file,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/registration-payments/{payment_id}/approve", response_model=dict)
