@@ -63,8 +63,9 @@ from app.common.exporter import (
     create_members_excel,
     create_officials_excel,
     create_registration_payments_csv,
-    create_units_excel,
+    create_units_summary_csv,
 )
+from app.admin.units_summary_export import load_units_summary_for_export
 from app.units.member_serialization import (
     MEMBER_RESIDENCE_LOAD_OPTIONS,
     member_export_row,
@@ -2215,12 +2216,16 @@ async def _load_councilors_for_export(
 async def export_unit_data(
     export_type: str,
     id: Optional[int] = Query(None, description="Unit user id or district id depending on export type"),
+    registration_year: Optional[int] = Query(
+        None, description="Registration year to scope the 'units' export type to (defaults to current year)"
+    ),
     current_user: CustomUser = Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Export unit, member, official, or councilor data to Excel."""
+    """Export unit, member, official, or councilor data."""
     export_type = export_type.strip().lower()
     timestamp = format_timestamp_ist()
+    media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     if export_type == "members":
         rows = await _load_members_for_export(db)
@@ -2265,36 +2270,13 @@ async def export_unit_data(
         export_file = create_councilors_excel(rows)
         filename = f"unit_{id}_councilors_{timestamp}.xlsx"
     elif export_type == "units":
-        units = await list_all_units(current_user=current_user, db=db)
-        district_by_unit: dict[str, str] = {}
-        unit_name_ids = [
-            unit["user_id"]
-            for unit in units
-            if unit.get("user_id")
-        ]
-        if unit_name_ids:
-            user_rows = await db.execute(
-                select(CustomUser.id, UnitName.name, ClergyDistrict.name)
-                .join(UnitName, UnitName.id == CustomUser.unit_name_id)
-                .join(ClergyDistrict, ClergyDistrict.id == UnitName.clergy_district_id)
-                .where(CustomUser.id.in_(unit_name_ids))
-            )
-            for user_id, unit_name, district_name in user_rows.all():
-                district_by_unit[str(user_id)] = district_name or ""
-
-        rows = [
-            {
-                "username": unit.get("username", ""),
-                "unit_name": unit.get("unit_name", ""),
-                "district": district_by_unit.get(str(unit.get("user_id", "")), ""),
-                "member_count": unit.get("member_count", 0),
-                "status": unit.get("status", ""),
-                "payment_status": unit.get("payment_status", ""),
-            }
-            for unit in units
-        ]
-        export_file = create_units_excel(rows)
-        filename = f"units_{timestamp}.xlsx"
+        year = registration_year or await cycle_service.get_current_registration_year(db)
+        rows = await load_units_summary_for_export(
+            db, registration_year=year, exclude_user_id=current_user.id
+        )
+        export_file = create_units_summary_csv(rows)
+        filename = f"units_summary_{year}_{timestamp}.csv"
+        media_type = "text/csv"
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2303,7 +2285,7 @@ async def export_unit_data(
 
     return StreamingResponse(
         export_file,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
