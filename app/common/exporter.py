@@ -192,27 +192,45 @@ def create_members_excel(
     return create_styled_excel(headers, rows, "Unit Members")
 
 
-def create_units_excel(units_data: List[Dict[str, Any]]) -> BytesIO:
-    """Create Excel file for registered units."""
-    headers = [
-        "Unit Number",
-        "Unit Name",
-        "District",
-        "Member Count",
-        "Registration Status",
-        "Payment Status",
-    ]
-    rows = []
-    for unit in units_data:
-        rows.append([
-            unit.get("username", ""),
-            unit.get("unit_name", ""),
-            unit.get("district", ""),
-            unit.get("member_count", ""),
-            unit.get("status", ""),
-            unit.get("payment_status", ""),
+UNITS_SUMMARY_EXPORT_HEADERS = [
+    "Unit ID",
+    "Unit Name",
+    "Clergy District",
+    "Registration Year",
+    "Registration Status",
+    "Payment Status",
+    "Total Members",
+    "Female Members",
+    "Male Members",
+]
+
+
+def _units_summary_export_rows(rows: List[Dict[str, Any]]) -> List[List[Any]]:
+    result: List[List[Any]] = []
+    for row in rows:
+        result.append([
+            row.get("unit_id", ""),
+            row.get("unit_name", ""),
+            row.get("clergy_district", ""),
+            row.get("registration_year", ""),
+            row.get("registration_status", ""),
+            row.get("payment_status", ""),
+            row.get("total_members", 0),
+            row.get("female_members", 0),
+            row.get("male_members", 0),
         ])
-    return create_styled_excel(headers, rows, "Units")
+    return result
+
+
+def create_units_summary_csv(rows: List[Dict[str, Any]]) -> BytesIO:
+    """Create CSV file for the per-unit registration/payment/membership summary."""
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(UNITS_SUMMARY_EXPORT_HEADERS)
+    writer.writerows(_units_summary_export_rows(rows))
+    csv_bytes = BytesIO(buffer.getvalue().encode("utf-8-sig"))
+    csv_bytes.seek(0)
+    return csv_bytes
 
 
 ARCHIVED_MEMBER_EXPORT_HEADERS = [

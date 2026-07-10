@@ -82,3 +82,49 @@ def test_derive_unit_payment_status_uses_latest_approved_by_submission_order():
         _payment(PaymentProofStatus.APPROVED, 0, datetime(2026, 6, 2)),
     ]
     assert derive_unit_payment_status(True, payments) == "approved"
+
+
+from app.common.exporter import (  # noqa: E402
+    UNITS_SUMMARY_EXPORT_HEADERS,
+    _units_summary_export_rows,
+    create_units_summary_csv,
+)
+
+
+def test_units_summary_export_rows_maps_headers_in_order():
+    rows = [{
+        "unit_id": 12,
+        "unit_name": "Zion Unit",
+        "clergy_district": "Kottayam",
+        "registration_year": 2026,
+        "registration_status": "Completed",
+        "payment_status": "Fully paid",
+        "total_members": 42,
+        "female_members": 20,
+        "male_members": 22,
+    }]
+    result = _units_summary_export_rows(rows)
+    assert result == [[12, "Zion Unit", "Kottayam", 2026, "Completed", "Fully paid", 42, 20, 22]]
+
+
+def test_units_summary_export_rows_defaults_missing_fields():
+    result = _units_summary_export_rows([{}])
+    assert result == [["", "", "", "", "", "", 0, 0, 0]]
+
+
+def test_create_units_summary_csv_contains_header_and_row():
+    rows = [{
+        "unit_id": 1,
+        "unit_name": "Test Unit",
+        "clergy_district": "District A",
+        "registration_year": 2026,
+        "registration_status": "In Progress",
+        "payment_status": "Not submitted",
+        "total_members": 5,
+        "female_members": 2,
+        "male_members": 3,
+    }]
+    csv_bytes = create_units_summary_csv(rows)
+    content = csv_bytes.read().decode("utf-8-sig")
+    assert ",".join(UNITS_SUMMARY_EXPORT_HEADERS) in content
+    assert "1,Test Unit,District A,2026,In Progress,Not submitted,5,2,3" in content
