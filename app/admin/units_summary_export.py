@@ -87,9 +87,11 @@ async def load_units_summary_for_export(
     for cycle in cycles_result.scalars().all():
         cycles_by_user[cycle.registered_user_id] = cycle
 
+    cycle_ids = [cycle.id for cycle in cycles_by_user.values()]
     payments_result = await db.execute(
         select(UnitRegistrationPayment).where(
             UnitRegistrationPayment.registered_user_id.in_(user_ids),
+            UnitRegistrationPayment.registration_cycle_id.in_(cycle_ids),
         )
     )
     payments_by_user: Dict[int, List[UnitRegistrationPayment]] = {}
