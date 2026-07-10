@@ -128,3 +128,78 @@ def test_create_units_summary_csv_contains_header_and_row():
     content = csv_bytes.read().decode("utf-8-sig")
     assert ",".join(UNITS_SUMMARY_EXPORT_HEADERS) in content
     assert "1,Test Unit,District A,2026,In Progress,Not submitted,5,2,3" in content
+
+
+from types import SimpleNamespace as _SimpleNamespace  # noqa: E402
+
+from app.admin.units_summary_export import (  # noqa: E402
+    build_official_rows,
+    build_councilor_rows,
+)
+
+
+def _officials(**overrides):
+    fields = {
+        "president_name": "",
+        "president_phone": "",
+        "vice_president_name": "",
+        "vice_president_phone": "",
+        "secretary_name": "",
+        "secretary_phone": "",
+        "joint_secretary_name": "",
+        "joint_secretary_phone": "",
+        "treasurer_name": "",
+        "treasurer_phone": "",
+    }
+    fields.update(overrides)
+    return _SimpleNamespace(**fields)
+
+
+def test_build_official_rows_sorted_alphabetically_by_name():
+    officials = _officials(
+        president_name="Zachariah", president_phone="111",
+        vice_president_name="Anna", vice_president_phone="222",
+        secretary_name="Mathew", secretary_phone="333",
+        joint_secretary_name="Beena", joint_secretary_phone="444",
+        treasurer_name="Thomas", treasurer_phone="555",
+    )
+    rows = build_official_rows(officials)
+    assert [r["name"] for r in rows] == ["Anna", "Beena", "Mathew", "Thomas", "Zachariah"]
+    assert rows[0] == {"role": "Vice President", "name": "Anna", "phone": "222"}
+
+
+def test_build_official_rows_none_officials_returns_five_blank_rows_in_role_order():
+    rows = build_official_rows(None)
+    assert len(rows) == 5
+    assert all(r["name"] == "" and r["phone"] == "" for r in rows)
+    assert [r["role"] for r in rows] == [
+        "President", "Vice President", "Secretary", "Joint Secretary", "Treasurer",
+    ]
+
+
+def test_build_official_rows_partial_blanks_sort_before_named():
+    officials = _officials(president_name="Zed", secretary_name="Amy")
+    rows = build_official_rows(officials)
+    assert rows[0]["name"] == ""
+    assert [r["name"] for r in rows[-2:]] == ["Amy", "Zed"]
+
+
+def test_build_councilor_rows_sorted_alphabetically_by_name():
+    councilors = [
+        _SimpleNamespace(unit_member=_SimpleNamespace(name="Zoe", number="1")),
+        _SimpleNamespace(unit_member=_SimpleNamespace(name="Alan", number="2")),
+    ]
+    rows = build_councilor_rows(councilors)
+    assert rows == [
+        {"role": "Councilor", "name": "Alan", "phone": "2"},
+        {"role": "Councilor", "name": "Zoe", "phone": "1"},
+    ]
+
+
+def test_build_councilor_rows_empty_list_returns_empty():
+    assert build_councilor_rows([]) == []
+
+
+def test_build_councilor_rows_missing_unit_member_defaults_blank():
+    councilors = [_SimpleNamespace(unit_member=None)]
+    assert build_councilor_rows(councilors) == [{"role": "Councilor", "name": "", "phone": ""}]

@@ -55,6 +55,44 @@ def derive_unit_payment_status(
     return "pending"
 
 
+_OFFICIAL_ROLE_FIELDS = [
+    ("President", "president_name", "president_phone"),
+    ("Vice President", "vice_president_name", "vice_president_phone"),
+    ("Secretary", "secretary_name", "secretary_phone"),
+    ("Joint Secretary", "joint_secretary_name", "joint_secretary_phone"),
+    ("Treasurer", "treasurer_name", "treasurer_phone"),
+]
+
+
+def build_official_rows(officials: Optional[Any]) -> List[Dict[str, str]]:
+    """Build the 5 fixed-role official rows for one unit, sorted alphabetically by name.
+    `officials` is a UnitOfficials instance, or None if the unit has no officials record
+    yet — either way, exactly 5 rows are always returned so a unit is never dropped."""
+    rows = [
+        {
+            "role": role,
+            "name": (getattr(officials, name_field, None) if officials else None) or "",
+            "phone": (getattr(officials, phone_field, None) if officials else None) or "",
+        }
+        for role, name_field, phone_field in _OFFICIAL_ROLE_FIELDS
+    ]
+    return sorted(rows, key=lambda r: r["name"])
+
+
+def build_councilor_rows(councilors: List[Any]) -> List[Dict[str, str]]:
+    """Build councilor rows from UnitCouncilor instances (each exposing `.unit_member`),
+    sorted alphabetically by name."""
+    rows = [
+        {
+            "role": "Councilor",
+            "name": (councilor.unit_member.name if councilor.unit_member else "") or "",
+            "phone": (councilor.unit_member.number if councilor.unit_member else "") or "",
+        }
+        for councilor in councilors
+    ]
+    return sorted(rows, key=lambda r: r["name"])
+
+
 async def load_units_summary_for_export(
     db: AsyncSession,
     *,
