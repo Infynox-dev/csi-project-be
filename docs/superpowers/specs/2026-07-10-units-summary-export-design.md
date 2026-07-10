@@ -65,10 +65,22 @@ Query shape:
 - Where there is no cycle row for that year, `status` becomes `"Not Started"` (matching
   today's synthesized fallback) and `payment_status` becomes `"not_submitted"`.
 - Separately, aggregate `UnitMembers` grouped by `registered_user_id` and `gender`
-  (`'M'` / `'F'`) for members belonging to that same registration cycle, to get
-  `total_members`, `female_members`, `male_members` per unit. This is a new query — no
-  existing query aggregates gender per individual unit; the only precedent is a
-  per-*district* dashboard aggregate.
+  (`'M'` / `'F'`) to get `total_members`, `female_members`, `male_members` per unit.
+  **Important:** `UnitMembers` has no per-season versioning — `added_registration_cycle_id`
+  (`app/auth/models.py:164`) is stamped once when a member is added and never updated in
+  later seasons. Filtering members by "cycle == the requested year's cycle" would select
+  only members *added in that specific season*, badly undercounting the roster (and
+  returning near-empty results for past years). To match today's `member_count` behavior
+  in `list_all_units` (`app/admin/routers/units.py:402-413`, which counts **all**
+  `UnitMembers` rows for a `registered_user_id` with no year filter), this loader must
+  count members the same way: no year filter on the `UnitMembers` aggregate itself, only
+  on the `UnitRegistrationCycle` join used for status/payment fields. This means the
+  member/gender counts reflect the unit's *current* roster regardless of which year is
+  selected — a known limitation inherited from the existing data model, not a regression,
+  but worth surfacing to admins (e.g. a note near the export button) so historical-year
+  exports aren't misread as historical membership snapshots.
+  This is still a new query — no existing query aggregates gender per individual unit;
+  the only precedent is a per-*district* dashboard aggregate.
 
 Each returned dict:
 
@@ -91,9 +103,18 @@ Each returned dict:
 Map raw values to the same display labels the frontend already uses, so the CSV is
 human-readable without post-processing:
 
-- Registration status: raw values `"Registration Started"`, `"Declaration Submitted"`,
-  `"Registration Completed"`, synthesized `"Not Started"` — passed through as-is (they're
-  already human-readable); no further mapping needed.
+- Registration status: the raw `UnitRegistrationCycle.status` string has more values than
+  a first pass suggests — `"Registration Started"`, `"Declaration Submitted"`,
+  `"Registration Completed"`, `"Unit Officials Completed"`, `"Unit Councilors Completed"`
+  (`app/units/registration_cycle_service.py:20-23,177,273`), plus synthesized `"Not Started"`
+  when no cycle row exists. The frontend's own `mapUnitStatus`
+  (`csi-webapp-fe/services/api.ts:1097-1102`) already collapses these to four display
+  values: `"Registration Completed"` → Completed, `"Declaration Submitted"` → Awaiting
+  Completion, `"Not Started"`/`"Not Registered"` → Not Started, and **everything else**
+  (including both "Unit Officials/Councilors Completed" values) → In Progress. The backend
+  loader must apply this same mapping before writing the CSV column, so the export shows
+  the same four statuses admins already see in the UI (ViewAllUnits, Export Data) instead
+  of leaking raw intermediate states that appear nowhere else.
 - Payment status: raw values `not_submitted` / `pending` / `partial` / `approved` /
   `rejected` → labels currently duplicated in the frontend's
   `PAYMENT_STATUS_LABELS` (`ViewAllUnits.tsx`): `"Not submitted"`, `"Pending review"`,
@@ -132,20 +153,29 @@ In `export_unit_data` (`app/admin/routers/units.py`, `GET /admin/units/export/{e
 
 ### `services/api.ts` — `exportData`
 
-Current signature hardcodes `.xlsx` as the download filename and doesn't read
-`Content-Disposition` (unlike `exportRegistrationPayments`, which uses `downloadBlob` +
-`getFilenameFromContentDisposition`).
+Current signature (`csi-webapp-fe/services/api.ts:2008-2017`) hardcodes `.xlsx` as the
+download filename, builds the query string manually (`if (id) endpoint += '?id=' + id`),
+and — unlike `exportRegistrationPayments` — downloads the blob itself internally via
+`downloadBlob` before returning.
 
-Change to:
+This spec keeps `exportData`'s existing internal-auto-download behavior (the new
+ExportData.tsx card and the ViewAllUnits button both just call `api.exportData(...)` and
+let it handle the download, same as today) — it does **not** switch to the
+`handlePaymentExport`-style pattern of returning a raw blob for the caller to download.
+Only the following are fixed inside `exportData` itself:
 
 ```ts
 async exportData(type: string, id?: number, registrationYear?: number): Promise<ApiResponse<Blob>>
 ```
 
-- Append `registration_year` to the query string when provided.
+- Build the query string with `URLSearchParams` instead of manual concatenation, so `id`
+  and `registrationYear` can each be present independently without producing a malformed
+  URL (today's `if (id) endpoint += '?id=' + id` breaks if a second param is appended
+  when `id` is undefined, since there'd be no leading `?`).
 - Read the filename from the response's `Content-Disposition` header via
   `getFilenameFromContentDisposition`, falling back to `${type}.xlsx` only when the header
-  is missing (preserves current behavior for the untouched Excel export types).
+  is missing (preserves current behavior for the untouched Excel export types, which don't
+  need to change).
 
 ### `ExportData.tsx` (`#/admin/export`)
 
@@ -156,9 +186,13 @@ Add a new card in the "Unit Data" section, after "Export Unit-wise Data":
   in this file for the payment section — lift it to component scope if not already, no
   behavior change).
 - An "Export (CSV)" button calling
-  `api.exportData('units', undefined, selectedSummaryYear)`.
-- Loading/disabled state and toast handling follow the same pattern as
-  `handlePaymentExport`.
+  `api.exportData('units', undefined, selectedSummaryYear)` — this call auto-downloads via
+  `exportData`'s existing internal `downloadBlob`, so the handler itself only needs
+  try/catch + toast, same shape as `handleDistrictOfficialsExport`/`handleUnitOfficialsExport`
+  (not `handlePaymentExport`, which manages the blob/download itself because its service
+  method returns a raw blob instead of auto-downloading).
+- Loading/disabled state and toast handling otherwise follow the same pattern as the other
+  handlers in this file.
 
 ### `ViewAllUnits.tsx`
 
