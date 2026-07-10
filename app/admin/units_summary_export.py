@@ -6,7 +6,14 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.auth.models import CustomUser, UnitMembers, UnitName, UnitRegistrationData
+from app.auth.models import (
+    CustomUser,
+    UnitCouncilor,
+    UnitMembers,
+    UnitName,
+    UnitOfficials,
+    UnitRegistrationData,
+)
 from app.units.models import PaymentProofStatus, UnitRegistrationCycle, UnitRegistrationPayment
 
 
@@ -160,7 +167,25 @@ async def load_units_summary_for_export(
         for row in member_counts_result.all()
     }
 
-    rows: List[Dict[str, Any]] = []
+    # Officials/Councilors are NOT year-versioned (same limitation as UnitMembers) —
+    # these reflect the unit's current officials/councilors regardless of `registration_year`.
+    officials_by_user: Dict[int, UnitOfficials] = {}
+    officials_result = await db.execute(
+        select(UnitOfficials).where(UnitOfficials.registered_user_id.in_(user_ids))
+    )
+    for officials in officials_result.scalars().all():
+        officials_by_user[officials.registered_user_id] = officials
+
+    councilors_by_user: Dict[int, List[UnitCouncilor]] = {}
+    councilors_result = await db.execute(
+        select(UnitCouncilor)
+        .options(selectinload(UnitCouncilor.unit_member))
+        .where(UnitCouncilor.registered_user_id.in_(user_ids))
+    )
+    for councilor in councilors_result.scalars().all():
+        councilors_by_user.setdefault(councilor.registered_user_id, []).append(councilor)
+
+    unit_bases: List[Dict[str, Any]] = []
     for unit_data in units_data:
         user_id = unit_data.registered_user_id
         user = unit_data.registered_user
@@ -178,8 +203,9 @@ async def load_units_summary_for_export(
         counts = member_counts_by_user.get(user_id, {"total": 0, "female": 0, "male": 0})
         unit_name = user.unit_name if user else None
 
-        rows.append(
+        unit_bases.append(
             {
+                "user_id": user_id,
                 "unit_id": unit_name.id if unit_name else None,
                 "unit_name": unit_name.name if unit_name else "",
                 "clergy_district": unit_name.district.name if unit_name and unit_name.district else "",
@@ -191,4 +217,15 @@ async def load_units_summary_for_export(
                 "male_members": counts["male"],
             }
         )
+
+    unit_bases.sort(key=lambda base: base["unit_name"])
+
+    rows: List[Dict[str, Any]] = []
+    for base in unit_bases:
+        user_id = base["user_id"]
+        person_rows = build_official_rows(officials_by_user.get(user_id)) + build_councilor_rows(
+            councilors_by_user.get(user_id, [])
+        )
+        for person in person_rows:
+            rows.append({**base, **person})
     return rows

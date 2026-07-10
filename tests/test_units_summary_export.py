@@ -102,14 +102,18 @@ def test_units_summary_export_rows_maps_headers_in_order():
         "total_members": 42,
         "female_members": 20,
         "male_members": 22,
+        "role": "President",
+        "name": "Anna",
+        "phone": "9999999999",
     }]
     result = _units_summary_export_rows(rows)
-    assert result == [[12, "Zion Unit", "Kottayam", 2026, "Completed", "Fully paid", 42, 20, 22]]
+    assert result == [[12, "Zion Unit", "Kottayam", 2026, "Completed", "Fully paid", 42, 20, 22,
+                        "President", "Anna", "9999999999"]]
 
 
 def test_units_summary_export_rows_defaults_missing_fields():
     result = _units_summary_export_rows([{}])
-    assert result == [["", "", "", "", "", "", 0, 0, 0]]
+    assert result == [["", "", "", "", "", "", 0, 0, 0, "", "", ""]]
 
 
 def test_create_units_summary_csv_contains_header_and_row():
@@ -123,11 +127,14 @@ def test_create_units_summary_csv_contains_header_and_row():
         "total_members": 5,
         "female_members": 2,
         "male_members": 3,
+        "role": "Councilor",
+        "name": "Test Person",
+        "phone": "8888888888",
     }]
     csv_bytes = create_units_summary_csv(rows)
     content = csv_bytes.read().decode("utf-8-sig")
     assert ",".join(UNITS_SUMMARY_EXPORT_HEADERS) in content
-    assert "1,Test Unit,District A,2026,In Progress,Not submitted,5,2,3" in content
+    assert "1,Test Unit,District A,2026,In Progress,Not submitted,5,2,3,Councilor,Test Person,8888888888" in content
 
 
 from types import SimpleNamespace as _SimpleNamespace  # noqa: E402
@@ -203,3 +210,28 @@ def test_build_councilor_rows_empty_list_returns_empty():
 def test_build_councilor_rows_missing_unit_member_defaults_blank():
     councilors = [_SimpleNamespace(unit_member=None)]
     assert build_councilor_rows(councilors) == [{"role": "Councilor", "name": "", "phone": ""}]
+
+
+def test_units_summary_export_rows_includes_role_name_phone_columns():
+    rows = [{
+        "unit_id": 1,
+        "unit_name": "Zion Unit",
+        "clergy_district": "Kottayam",
+        "registration_year": 2026,
+        "registration_status": "Completed",
+        "payment_status": "Fully paid",
+        "total_members": 10,
+        "female_members": 5,
+        "male_members": 5,
+        "role": "President",
+        "name": "Anna Thomas",
+        "phone": "9999999999",
+    }]
+    result = _units_summary_export_rows(rows)
+    assert result == [[1, "Zion Unit", "Kottayam", 2026, "Completed", "Fully paid", 10, 5, 5,
+                        "President", "Anna Thomas", "9999999999"]]
+
+
+def test_units_summary_export_rows_defaults_role_name_phone_when_missing():
+    result = _units_summary_export_rows([{}])
+    assert result[0][-3:] == ["", "", ""]

@@ -202,6 +202,9 @@ UNITS_SUMMARY_EXPORT_HEADERS = [
     "Total Members",
     "Female Members",
     "Male Members",
+    "Role",
+    "Name",
+    "Phone",
 ]
 
 
@@ -218,6 +221,9 @@ def _units_summary_export_rows(rows: List[Dict[str, Any]]) -> List[List[Any]]:
             row.get("total_members", 0),
             row.get("female_members", 0),
             row.get("male_members", 0),
+            row.get("role", ""),
+            row.get("name", ""),
+            row.get("phone", ""),
         ])
     return result
 
