@@ -1,13 +1,8 @@
-"""Pure logic and DB loader for the units-summary CSV export."""
+"""Pure logic for the units-summary CSV export."""
 
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
-from sqlalchemy import case, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-
-from app.auth.models import CustomUser, UnitMembers, UnitName, UnitRegistrationData
-from app.units.models import PaymentProofStatus, UnitRegistrationCycle, UnitRegistrationPayment
+from app.units.models import PaymentProofStatus, UnitRegistrationPayment
 
 
 def map_registration_status_for_display(raw_status: Optional[str]) -> str:
