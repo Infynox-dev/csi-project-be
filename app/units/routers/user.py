@@ -206,16 +206,7 @@ async def get_application_form(
     members_amount = member_count * unit_member_fee
     total_amount = members_amount + unit_registration_fee
 
-    if 1 <= member_count <= 25:
-        number_of_fields = 1
-    elif 26 <= member_count <= 50:
-        number_of_fields = 2
-    elif 51 <= member_count <= 75:
-        number_of_fields = 3
-    elif 76 <= member_count <= 100:
-        number_of_fields = 4
-    else:
-        number_of_fields = 5
+    number_of_fields = cycle_service.required_councilor_count(member_count)
 
     registration_status = cycle.status if cycle else "Not Started"
     registration_year = (
@@ -582,6 +573,7 @@ async def confirm_unit_councilors(
 ):
     """Mark councilors section as complete."""
     cycle = await _get_wizard_cycle(db, current_user.id)
+    await cycle_service.ensure_councilor_requirement_met(db, current_user.id)
     cycle.status = "Unit Councilors Completed"
     await db.commit()
     
@@ -635,6 +627,9 @@ async def complete_declaration(
         select(UnitMembers).where(UnitMembers.registered_user_id == current_user.id)
     )
     member_count = len(list(member_count_result.scalars().all()))
+    await cycle_service.ensure_councilor_requirement_met(
+        db, current_user.id, member_count=member_count
+    )
     unit_fee, member_fee = await _get_unit_registration_fees(db)
     total_fee = unit_fee + (member_count * member_fee)
 

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.models import SiteSettings
-from app.auth.models import UnitDetails, UnitOfficials, UnitMembers
+from app.auth.models import UnitCouncilor, UnitDetails, UnitOfficials, UnitMembers
 from app.units.models import (
     PaymentProofStatus,
     UnitRegistrationCycle,
@@ -35,6 +35,52 @@ MEMBER_PROFILE_FIELDS = ("name", "gender", "dob", "number", "qualification", "bl
 
 # Member fields that may be updated inline during renewal registration.
 RENEWAL_WIZARD_INLINE_MEMBER_FIELDS = frozenset({"blood_group", "number", "qualification"})
+
+
+def required_councilor_count(member_count: int) -> int:
+    """Return the number of councilors required for a unit roster size."""
+    if member_count <= 25:
+        return 1
+    if member_count <= 50:
+        return 2
+    if member_count <= 75:
+        return 3
+    if member_count <= 100:
+        return 4
+    return 5
+
+
+async def ensure_councilor_requirement_met(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    member_count: Optional[int] = None,
+) -> None:
+    """Raise when the unit has not selected the required number of councilors."""
+    if member_count is None:
+        member_count_result = await db.execute(
+            select(func.count())
+            .select_from(UnitMembers)
+            .where(UnitMembers.registered_user_id == user_id)
+        )
+        member_count = member_count_result.scalar() or 0
+
+    required = required_councilor_count(member_count)
+    councilor_count_result = await db.execute(
+        select(func.count())
+        .select_from(UnitCouncilor)
+        .where(UnitCouncilor.registered_user_id == user_id)
+    )
+    councilor_count = councilor_count_result.scalar() or 0
+
+    if councilor_count != required:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Select exactly {required} councilor(s) before continuing. "
+                f"Currently selected: {councilor_count}."
+            ),
+        )
 
 
 async def get_site_settings(db: AsyncSession) -> Optional[SiteSettings]:
