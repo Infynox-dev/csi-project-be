@@ -1,9 +1,17 @@
 import logging
+
+from app.common.config import get_settings
+from app.common.telemetry import init_telemetry, instrument_fastapi_app
+
+# Settings + telemetry BEFORE FastAPI() so Sentry Starlette/FastAPI integrations patch correctly.
+settings = get_settings()
+logging.basicConfig(level=logging.INFO)
+init_telemetry(settings)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from app.common.config import get_settings
 from app.common import file_router
 from app.auth import router as auth_router
 from app.units.routers import user as units_user
@@ -13,12 +21,8 @@ from app.kalamela.routers import public as kalamela_public, official as kalamela
 from app.yuvalokham.routers import auth as ym_auth, user as ym_user, admin as ym_admin
 from app.master import router as master_router
 
-
-settings = get_settings()
-
-logging.basicConfig(level=logging.INFO)
-
 app = FastAPI(title=settings.app_name, version="0.1.0")
+instrument_fastapi_app(app)
 
 # Compress responses >= 1 KB (covers JSON list payloads)
 app.add_middleware(GZipMiddleware, minimum_size=1000)

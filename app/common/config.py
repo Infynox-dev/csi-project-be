@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     # Redis shared cache (multi-worker). Leave unset for in-memory local fallback.
     redis_url: Optional[str] = None
 
+    # Observability (Urgentry + OTel). Unset = local quiet / no export.
+    environment: str = "development"
+    sentry_dsn: Optional[str] = None
+    sentry_traces_sample_rate: float = 0.0
+    sentry_release: Optional[str] = None
+    otel_exporter_otlp_endpoint: Optional[str] = None
+    otel_service_name: str = "csi-api"
+    otel_resource_attributes: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:
