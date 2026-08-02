@@ -6,6 +6,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
+# Source is needed only to build the wheel into .venv (--no-editable).
+# After that install, /app/app is not kept; the package lives in site-packages.
 COPY app main.py alembic.ini ./
 COPY alembic ./alembic
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -14,10 +16,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.11-slim-bookworm AS runner
 WORKDIR /app
 RUN useradd --create-home --uid 10001 appuser
+# Runtime: venv (includes installed `app` package) + entrypoint + alembic assets
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
-COPY --from=builder --chown=appuser:appuser /app/app /app/app
-COPY --from=builder --chown=appuser:appuser /app/main.py /app/alembic.ini /app/
-COPY --from=builder --chown=appuser:appuser /app/alembic /app/alembic
+COPY --chown=appuser:appuser main.py alembic.ini ./
+COPY --chown=appuser:appuser alembic ./alembic
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     WEB_CONCURRENCY=2
