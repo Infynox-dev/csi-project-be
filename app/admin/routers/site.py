@@ -42,7 +42,7 @@ def get_public_file_url(object_key: str | None) -> str | None:
         return None
     # Use the API proxy endpoint to serve files
     # Remove the prefix since the proxy will add it
-    prefix = settings.b2_key_prefix or ""
+    prefix = settings.storage_key_prefix or ""
     path = object_key[len(prefix):] if object_key.startswith(prefix) else object_key
     return f"/api/files/{path}"
 
@@ -182,7 +182,7 @@ def upload_logo(
     
     settings = get_or_create_site_settings(db)
     
-    # Upload to B2 storage
+    # Upload to object storage
     object_key, _ = save_upload_file(file, subdir="site/logos")
     
     # Update the appropriate logo field
@@ -206,22 +206,22 @@ def upload_logo(
 @router.get("/files/{file_path:path}")
 def get_file(file_path: str):
     """
-    Proxy endpoint to serve files from B2 storage.
-    This is needed because presigned URLs don't work well with restricted B2 keys.
+    Proxy endpoint to serve files from object storage.
+    This is needed because presigned URLs don't work well with restricted storage keys.
     """
     from fastapi.responses import StreamingResponse
     from app.common.storage import get_s3_client
     from botocore.exceptions import ClientError
     
     # Add the required prefix if not present
-    prefix = settings.b2_key_prefix or ""
+    prefix = settings.storage_key_prefix or ""
     if not file_path.startswith(prefix):
         file_path = f"{prefix}{file_path}"
     
     try:
         s3_client = get_s3_client()
         response = s3_client.get_object(
-            Bucket=settings.b2_bucket_name,
+            Bucket=settings.storage_bucket,
             Key=file_path
         )
         

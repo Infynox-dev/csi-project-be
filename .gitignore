@@ -22,5 +22,7 @@ storage/
 *.db
 *.sqlite
 
-# Lock file (platform-specific binaries)
-uv.lock
+
+# Generated benchmark output
+logs_result.json
+.vercel

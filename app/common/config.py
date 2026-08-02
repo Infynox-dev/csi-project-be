@@ -39,13 +39,15 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 5
     allowed_upload_extensions: List[str] = [".pdf", ".png", ".jpg", ".jpeg", ".webp"]
 
-    # Backblaze B2 Storage
-    b2_endpoint: str = "https://s3.eu-central-003.backblazeb2.com"
-    b2_bucket_name: str = "csi-youthmovement"
-    b2_key_id: str = "4c6b021b5a16"
-    b2_application_key: str = "00375a2d3225788e08472bed0aec292c1e166269e1"
-    b2_region: str = "eu-central-003"
-    b2_key_prefix: str = "csi_youth_"  # Required prefix for B2 application key
+    # Object storage (any S3-compatible provider: OCI, Backblaze B2, ...)
+    # Set STORAGE_* in the environment; no credential defaults are shipped.
+    storage_endpoint: str = ""
+    storage_bucket: str = ""
+    storage_access_key_id: str = ""
+    storage_secret_access_key: str = ""
+    storage_region: str = ""
+    # Legacy B2 key layout, kept so existing DB object keys resolve
+    storage_key_prefix: str = "csi_youth_"
 
     # Pagination defaults
     default_page_size: int = 50
@@ -60,6 +62,9 @@ class Settings(BaseSettings):
 
     # OCR.space (optional PDF payment amount detection)
     ocr_space_api_key: Optional[str] = None
+
+    # Redis shared cache (multi-worker). Leave unset for in-memory local fallback.
+    redis_url: Optional[str] = None
 
 
 @lru_cache

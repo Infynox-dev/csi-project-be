@@ -11,7 +11,7 @@ import main  # noqa: E402
 
 def test_health():
     client = TestClient(main.app)
-    response = client.get("/health")
+    response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
