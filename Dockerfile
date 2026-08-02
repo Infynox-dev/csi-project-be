@@ -3,8 +3,7 @@ FROM python:3.11-slim-bookworm AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=0
 WORKDIR /app
-# Install dependencies only — the FastAPI `app` package is copied as source
-# (hatchling wheel for this flat layout did not include `app` in site-packages).
+# Install dependencies only — FastAPI code is copied as source below.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
@@ -13,7 +12,9 @@ FROM python:3.11-slim-bookworm AS runner
 WORKDIR /app
 RUN useradd --create-home --uid 10001 appuser
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
-COPY --chown=appuser:appuser app main.py alembic.ini ./
+# COPY <dir> ./ flattens contents — must target ./app explicitly.
+COPY --chown=appuser:appuser app ./app
+COPY --chown=appuser:appuser main.py alembic.ini ./
 COPY --chown=appuser:appuser alembic ./alembic
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH=/app \
