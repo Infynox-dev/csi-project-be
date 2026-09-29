@@ -716,19 +716,47 @@ async def list_districts_for_officials(
     result = await db.execute(stmt)
     districts = list(result.scalars().all())
     
-    # Get districts that have officials
-    stmt = select(CustomUser.clergy_district_id).where(
+    # Map district_id -> official (one per district)
+    stmt = select(CustomUser).where(
         CustomUser.user_type == UserType.DISTRICT_OFFICIAL
-    ).distinct()
+    )
     result = await db.execute(stmt)
-    districts_with_officials = {row[0] for row in result.all()}
+    officials_by_district = {
+        official.clergy_district_id: official
+        for official in result.scalars().all()
+        if official.clergy_district_id is not None
+    }
     
     return [
         {
             "id": district.id,
             "name": district.name,
-            "has_official": district.id in districts_with_officials,
-            "login_username": district.name if district.id in districts_with_officials else None,
+            "has_official": district.id in officials_by_district,
+            "login_username": (
+                officials_by_district[district.id].username
+                if district.id in officials_by_district
+                else None
+            ),
+            "official_id": (
+                officials_by_district[district.id].id
+                if district.id in officials_by_district
+                else None
+            ),
+            "official_name": (
+                officials_by_district[district.id].first_name
+                if district.id in officials_by_district
+                else None
+            ),
+            "official_phone": (
+                officials_by_district[district.id].phone_number
+                if district.id in officials_by_district
+                else None
+            ),
+            "official_username": (
+                officials_by_district[district.id].username
+                if district.id in officials_by_district
+                else None
+            ),
         }
         for district in districts
     ]
