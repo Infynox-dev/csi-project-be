@@ -212,3 +212,17 @@ class DistrictPaymentInfo(BaseModel):
     payments: list
     count_of_officials: int
     count_of_members: int
+
+
+class ConferenceSettingsResponse(BaseModel):
+    """Conference module settings (singleton)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    delegate_fee: int
+
+
+class ConferenceSettingsUpdate(BaseModel):
+    """Update conference module settings."""
+
+    delegate_fee: int = Field(..., ge=0)

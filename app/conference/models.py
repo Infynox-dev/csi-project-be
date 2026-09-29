@@ -20,6 +20,19 @@ class PaymentStatusEnum(str, enum.Enum):
     DECLINED = "DECLINED"
 
 
+class ConferenceSettings(Base):
+    """Singleton settings for the conference module."""
+
+    __tablename__ = "conference_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Per-delegate fee in INR (officials + added members)
+    delegate_fee: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=now_ist, onupdate=now_ist, nullable=False
+    )
+
+
 class Conference(Base):
     """Conference model for managing conferences."""
     

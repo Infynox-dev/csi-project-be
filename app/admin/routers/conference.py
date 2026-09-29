@@ -16,6 +16,8 @@ from app.conference.schemas import (
     ConferenceResponse,
     DistrictOfficialCreate,
     DistrictOfficialUpdate,
+    ConferenceSettingsResponse,
+    ConferenceSettingsUpdate,
 )
 from app.conference import service as conference_service
 
@@ -32,6 +34,25 @@ async def get_admin_user(
             detail="Access denied. Admin privileges required."
         )
     return current_user
+
+
+@router.get("/settings", response_model=ConferenceSettingsResponse)
+async def get_conference_settings(
+    current_user: CustomUser = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Get conference module settings (delegate fee)."""
+    return await conference_service.get_or_create_conference_settings(db)
+
+
+@router.put("/settings", response_model=ConferenceSettingsResponse)
+async def update_conference_settings(
+    data: ConferenceSettingsUpdate,
+    current_user: CustomUser = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Update conference module settings (delegate fee)."""
+    return await conference_service.update_conference_settings(db, data)
 
 
 @router.get("/home", response_model=List[ConferenceResponse])
@@ -114,8 +135,10 @@ async def get_payment_info(
 ):
     """Get payment information aggregated by district."""
     payment_info = await conference_service.get_payment_info(db, conference_id)
+    fee = await conference_service.get_delegate_fee(db)
     return {
         "conference_id": conference_id,
+        "delegate_fee": fee,
         "district_info": payment_info,
     }
 

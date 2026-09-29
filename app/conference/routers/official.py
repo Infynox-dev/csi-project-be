@@ -182,7 +182,9 @@ async def view_delegates(
     
     delegates_count = len(delegate_members) + len(delegate_officials)
     max_count = current_user.conference_official_count + current_user.conference_member_count
-    amount_to_pay = max_count * 300
+    fee = await conference_service.get_delegate_fee(db)
+    # Fee = per-delegate rate × (district officials + members added as delegates)
+    amount_to_pay = delegates_count * fee
     
     # Get payment status (get the latest payment)
     stmt = select(ConferencePayment).where(

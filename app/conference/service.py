@@ -19,6 +19,7 @@ from app.conference.models import (
     ConferenceRegistrationData,
     ConferenceDelegate,
     ConferencePayment,
+    ConferenceSettings,
     FoodPreference,
     PaymentStatusEnum,
 )
@@ -28,8 +29,40 @@ from app.conference.schemas import (
     DistrictOfficialCreate,
     FoodPreferenceCreate,
     ConferencePaymentCreate,
+    ConferenceSettingsUpdate,
 )
 from app.common.security import get_password_hash
+
+
+DEFAULT_DELEGATE_FEE = 300
+
+
+async def get_or_create_conference_settings(db: AsyncSession) -> ConferenceSettings:
+    """Return the singleton conference settings row, creating it if missing."""
+    result = await db.execute(select(ConferenceSettings).limit(1))
+    settings = result.scalar_one_or_none()
+    if settings is None:
+        settings = ConferenceSettings(delegate_fee=DEFAULT_DELEGATE_FEE)
+        db.add(settings)
+        await db.commit()
+        await db.refresh(settings)
+    return settings
+
+
+async def get_delegate_fee(db: AsyncSession) -> int:
+    settings = await get_or_create_conference_settings(db)
+    return settings.delegate_fee
+
+
+async def update_conference_settings(
+    db: AsyncSession,
+    data: ConferenceSettingsUpdate,
+) -> ConferenceSettings:
+    settings = await get_or_create_conference_settings(db)
+    settings.delegate_fee = data.delegate_fee
+    await db.commit()
+    await db.refresh(settings)
+    return settings
 
 
 # Conference Management Functions
@@ -231,17 +264,6 @@ async def add_conference_delegate_official(
                    f"Use the update endpoint to modify or reset password."
         )
     
-    # Check if username (district name) is already taken by another user type
-    stmt = select(CustomUser).where(CustomUser.username == district.name)
-    result = await db.execute(stmt)
-    existing_username = result.scalar_one_or_none()
-    
-    if existing_username:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Username '{district.name}' is already in use"
-        )
-    
     # Determine max conference member count based on district
     under_30_list = ['ADOOR', 'KOTTAYAM', 'KUMPALAMPOIKA', 'MALLAPPALLY', 'MAVELIKKARA', 'PALLOM', 'THIRUVALLA']
     under_25_list = ['ELANTHOOR', 'EATTUMANOOR', 'KODUKULANJI', 'MUNDAKKAYAM', 'PUNNAVELY']
@@ -252,47 +274,76 @@ async def add_conference_delegate_official(
     elif district.name in under_25_list:
         max_conference_member_count = 20
     
-    # Create password (phone number of the official)
-    password = str(member.number)
-    
-    # Create official user with DISTRICT NAME as username
-    # This enables district-wise login for Kalamela and Conference modules
-    official_user = CustomUser(
-        username=district.name,  # District name as username (e.g., 'THIRUVALLA')
-        email=f"{district.name.lower().replace(' ', '_')}@district.local",  # Unique email
-        first_name=member.name,
-        phone_number=str(member.number),
-        conference_id=conference_id,
-        clergy_district_id=member_district_id,
-        conference_official_count=5,
-        conference_member_count=max_conference_member_count,
-        user_type=UserType.DISTRICT_OFFICIAL,
-        hashed_password=get_password_hash(password),
-        is_active=True,
+    # Reuse User-Management district official if username already exists for this district
+    stmt = select(CustomUser).where(CustomUser.username == district.name)
+    result = await db.execute(stmt)
+    existing_username = result.scalar_one_or_none()
+
+    if existing_username:
+        if (
+            existing_username.user_type != UserType.DISTRICT_OFFICIAL
+            or existing_username.clergy_district_id != member_district_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Username '{district.name}' is already in use"
+            )
+        official_user = existing_username
+        official_user.conference_id = conference_id
+        official_user.first_name = member.name
+        official_user.phone_number = str(member.number)
+        official_user.conference_official_count = 5
+        official_user.conference_member_count = max_conference_member_count
+        official_user.is_active = True
+        official_user.hashed_password = get_password_hash(str(member.number))
+        await db.flush()
+    else:
+        # Create official user with DISTRICT NAME as username
+        official_user = CustomUser(
+            username=district.name,
+            email=f"{district.name.lower().replace(' ', '_')}@district.local",
+            first_name=member.name,
+            phone_number=str(member.number),
+            conference_id=conference_id,
+            clergy_district_id=member_district_id,
+            conference_official_count=5,
+            conference_member_count=max_conference_member_count,
+            user_type=UserType.DISTRICT_OFFICIAL,
+            hashed_password=get_password_hash(str(member.number)),
+            is_active=True,
+        )
+        db.add(official_user)
+        await db.flush()
+
+    # Ensure registration + official delegate rows exist for this conference
+    stmt = select(ConferenceRegistrationData).where(
+        ConferenceRegistrationData.district_official_id == official_user.id
     )
-    
-    db.add(official_user)
-    await db.flush()
-    
-    # Create conference registration data
-    conference_reg = ConferenceRegistrationData(
-        district_official_id=official_user.id,
-        status="Registration Started",
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is None:
+        db.add(ConferenceRegistrationData(
+            district_official_id=official_user.id,
+            status="Registration Started",
+        ))
+
+    stmt = select(ConferenceDelegate).where(
+        and_(
+            ConferenceDelegate.conference_id == conference_id,
+            ConferenceDelegate.officials_id == official_user.id,
+            ConferenceDelegate.members_id.is_(None),
+        )
     )
-    
-    db.add(conference_reg)
-    
-    # Create conference delegate entry
-    conference_delegate = ConferenceDelegate(
-        conference_id=conference_id,
-        officials_id=official_user.id,
-        members_id=None,
-    )
-    
-    db.add(conference_delegate)
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is None:
+        db.add(ConferenceDelegate(
+            conference_id=conference_id,
+            officials_id=official_user.id,
+            members_id=None,
+        ))
+
     await db.commit()
     await db.refresh(official_user)
-    
+
     return official_user
 
 
@@ -494,13 +545,33 @@ async def create_conference_payment(
     data: ConferencePaymentCreate,
 ) -> ConferencePayment:
     """Create a conference payment record."""
-    # Get user
     stmt = select(CustomUser).where(CustomUser.id == user_id)
     result = await db.execute(stmt)
     user = result.scalar_one()
-    
-    # Calculate amount
-    amount = (user.conference_official_count + user.conference_member_count) * 300
+
+    # Members this official added
+    stmt = select(func.count()).select_from(ConferenceDelegate).where(
+        and_(
+            ConferenceDelegate.conference_id == conference_id,
+            ConferenceDelegate.officials_id == user_id,
+            ConferenceDelegate.members_id.isnot(None),
+        )
+    )
+    result = await db.execute(stmt)
+    member_count = result.scalar() or 0
+
+    # District officials (same set shown as registered officials)
+    stmt = select(func.count()).select_from(CustomUser).where(
+        and_(
+            CustomUser.clergy_district_id == user.clergy_district_id,
+            CustomUser.user_type == UserType.DISTRICT_OFFICIAL,
+        )
+    )
+    result = await db.execute(stmt)
+    official_count = result.scalar() or 0
+
+    fee = await get_delegate_fee(db)
+    amount = (member_count + official_count) * fee
     
     payment = ConferencePayment(
         conference_id=conference_id,
@@ -787,4 +858,12 @@ async def get_payment_info(
             })
             district_info[district_name]['count_of_members'] += 1
     
-    return dict(district_info)
+    fee = await get_delegate_fee(db)
+    result_dict = {}
+    for district, info in district_info.items():
+        info['amount_due'] = (
+            info['count_of_officials'] + info['count_of_members']
+        ) * fee
+        result_dict[district] = info
+
+    return result_dict
