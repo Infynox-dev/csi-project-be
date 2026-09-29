@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 from typing import List, Optional, Dict, Any
 from collections import defaultdict
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select, and_, or_, func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, UploadFile, status
@@ -148,17 +148,8 @@ async def delete_conference(
     conference_id: int,
 ) -> bool:
     """
-    Delete a conference.
-    
-    Args:
-        db: Database session
-        conference_id: ID of the conference
-    
-    Returns:
-        True if deleted
-    
-    Raises:
-        HTTPException: If conference not found
+    Delete a conference and its related rows (delegates, payments, food prefs).
+    Clears custom_user.conference_id for officials assigned to this conference.
     """
     stmt = select(Conference).where(Conference.id == conference_id)
     result = await db.execute(stmt)
@@ -169,7 +160,23 @@ async def delete_conference(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conference not found"
         )
-    
+
+    # Child tables FK to conference without ON DELETE CASCADE
+    await db.execute(
+        delete(ConferenceDelegate).where(ConferenceDelegate.conference_id == conference_id)
+    )
+    await db.execute(
+        delete(ConferencePayment).where(ConferencePayment.conference_id == conference_id)
+    )
+    await db.execute(
+        delete(FoodPreference).where(FoodPreference.conference_id == conference_id)
+    )
+    await db.execute(
+        update(CustomUser)
+        .where(CustomUser.conference_id == conference_id)
+        .values(conference_id=None)
+    )
+
     await db.delete(conference)
     await db.commit()
     
