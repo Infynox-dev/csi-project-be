@@ -78,25 +78,39 @@ class ConferenceDelegate(Base):
 
 
 class ConferencePayment(Base):
-    """Payment tracking for conference registrations."""
-    
+    """Payment proof rows for a district conference ledger."""
+
     __tablename__ = "conference_payment"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     conference_id: Mapped[int] = mapped_column(
         ForeignKey("conference.id"), nullable=False, index=True
     )
+    clergy_district_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clergy_district.id"), nullable=True, index=True
+    )
     amount_to_pay: Mapped[Optional[float]] = mapped_column(Numeric(10, 2), nullable=True)
+    total_amount: Mapped[Optional[int]] = mapped_column(Integer)
+    balance_amount: Mapped[Optional[int]] = mapped_column(Integer)
+    approved_paid_amount: Mapped[Optional[int]] = mapped_column(Integer)
     uploaded_by_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("custom_user.id"), nullable=True, index=True
     )
-    proof_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # File path
+    proof_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     date: Mapped[datetime] = mapped_column(DateTime, default=now_ist, nullable=False)
     status: Mapped[Optional[PaymentStatusEnum]] = mapped_column(
         Enum(PaymentStatusEnum, name='paymentstatus', create_type=False),
         nullable=True
     )
     payment_reference: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    rejection_note: Mapped[Optional[str]] = mapped_column(Text)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    reviewed_by_id: Mapped[Optional[int]] = mapped_column(ForeignKey("custom_user.id"))
+
+    @property
+    def submitted_at(self) -> datetime:
+        """Alias so Units ledger helpers can sort conference proofs."""
+        return self.date
 
 
 class FoodPreference(Base):

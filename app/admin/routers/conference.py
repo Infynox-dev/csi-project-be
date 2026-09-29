@@ -1,12 +1,14 @@
 """Admin conference router - administrative endpoints for conference management."""
 
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.common.db import get_async_db
+from app.common.exporter import create_payment_info_excel
 from app.common.security import get_current_user
 from app.auth.models import CustomUser, UserType, UnitMembers, ClergyDistrict
 from app.conference.models import Conference, ConferenceDelegate
@@ -135,6 +137,7 @@ async def get_payment_info(
 ):
     """Get payment information aggregated by district."""
     payment_info = await conference_service.get_payment_info(db, conference_id)
+    await db.commit()
     fee = await conference_service.get_delegate_fee(db)
     return {
         "conference_id": conference_id,
@@ -143,19 +146,50 @@ async def get_payment_info(
     }
 
 
-@router.post("/{conference_id}/payment-info/export", response_model=dict)
+@router.post("/{conference_id}/payments/{payment_id}/approve", response_model=dict)
+async def approve_conference_payment(
+    conference_id: int,
+    payment_id: int,
+    paid_amount: int = Body(..., embed=True),
+    current_user: CustomUser = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Approve a district conference proof for an admin-entered paid amount."""
+    return await conference_service.approve_conference_payment(
+        db, payment_id, paid_amount, current_user.id, conference_id=conference_id
+    )
+
+
+@router.post("/{conference_id}/payments/{payment_id}/decline", response_model=dict)
+async def decline_conference_payment(
+    conference_id: int,
+    payment_id: int,
+    rejection_note: str = Body(..., embed=True),
+    current_user: CustomUser = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Decline a pending district conference proof."""
+    return await conference_service.decline_conference_payment(
+        db, payment_id, rejection_note, current_user.id, conference_id=conference_id
+    )
+
+
+@router.post("/{conference_id}/payment-info/export")
 async def export_payment_info(
     conference_id: int,
     current_user: CustomUser = Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Export payment information to Excel (placeholder)."""
+    """Export district conference ledgers to Excel."""
     payment_info = await conference_service.get_payment_info(db, conference_id)
-    return {
-        "message": "Excel export functionality to be implemented",
-        "conference_id": conference_id,
-        "data": payment_info,
-    }
+    await db.commit()
+    export_file = create_payment_info_excel(payment_info, conference_id)
+    filename = f"conference_payments_{conference_id}.xlsx"
+    return StreamingResponse(
+        export_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/officials", response_model=List[dict])

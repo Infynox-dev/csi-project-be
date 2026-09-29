@@ -1,11 +1,12 @@
 """Conference service layer - business logic for conference operations."""
 
+from types import SimpleNamespace
 from typing import List, Optional, Dict, Any
 from collections import defaultdict
 from sqlalchemy import select, and_, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 
 from app.auth.models import (
     CustomUser,
@@ -28,10 +29,17 @@ from app.conference.schemas import (
     ConferenceUpdate,
     DistrictOfficialCreate,
     FoodPreferenceCreate,
-    ConferencePaymentCreate,
     ConferenceSettingsUpdate,
 )
 from app.common.security import get_password_hash
+from app.common.datetime_utils import now_ist
+from app.common.storage import save_upload_file
+from app.admin.models import SiteSettings
+from app.admin.routers.site import get_public_file_url
+from app.units.registration_cycle_service import (
+    compute_total_paid_for_approved_payments,
+    recalculate_latest_approved_balance,
+)
 
 
 DEFAULT_DELEGATE_FEE = 300
@@ -341,6 +349,8 @@ async def add_conference_delegate_official(
             members_id=None,
         ))
 
+    await db.flush()
+    await recalculate_district_ledger(db, conference_id, member_district_id)
     await db.commit()
     await db.refresh(official_user)
 
@@ -415,10 +425,15 @@ async def delete_district_official(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="District official not found"
         )
-    
+
+    district_id = official.clergy_district_id
+    conference_id = official.conference_id
     await db.delete(official)
+    await db.flush()
+    if conference_id is not None:
+        await recalculate_district_ledger(db, conference_id, district_id)
     await db.commit()
-    
+
     return True
 
 
@@ -490,23 +505,13 @@ async def add_conference_delegate_member(
     )
     
     db.add(delegate)
-    
-    # Update payment status to PENDING if it was PAID
-    stmt = select(ConferencePayment).where(
-        and_(
-            ConferencePayment.conference_id == conference_id,
-            ConferencePayment.uploaded_by_id == official_user_id
-        )
-    ).order_by(ConferencePayment.date.desc())
-    result = await db.execute(stmt)
-    payment = result.scalar_one_or_none()
-    
-    if payment and payment.status == "PAID":
-        payment.status = "PENDING"
-    
+    await db.flush()
+    await recalculate_district_ledger(
+        db, conference_id, official.clergy_district_id
+    )
     await db.commit()
     await db.refresh(delegate)
-    
+
     return delegate
 
 
@@ -531,62 +536,384 @@ async def remove_conference_delegate_member(
             detail="Delegate member not found"
         )
     
+    official_result = await db.execute(
+        select(CustomUser.clergy_district_id).where(CustomUser.id == delegate.officials_id)
+    )
+    district_id = official_result.scalar_one_or_none()
     await db.delete(delegate)
+    await db.flush()
+    if district_id is not None:
+        await recalculate_district_ledger(db, conference_id, district_id)
     await db.commit()
-    
+
     return True
 
 
-# Payment Management
-async def create_conference_payment(
+PENDING_PROOF_STATUSES = (PaymentStatusEnum.PROOF_UPLOADED, PaymentStatusEnum.PENDING)
+
+
+def approved_proofs(payments: list[ConferencePayment]) -> list[ConferencePayment]:
+    return [p for p in payments if p.status == PaymentStatusEnum.PAID]
+
+
+def pending_proofs(payments: list[ConferencePayment]) -> list[ConferencePayment]:
+    return [p for p in payments if p.status in PENDING_PROOF_STATUSES]
+
+
+def build_conference_payment_summary(
+    *,
+    fee_owed: int,
+    official_count: int,
+    member_count: int,
+    approved: list[ConferencePayment],
+) -> dict[str, Any]:
+    cycle = SimpleNamespace(
+        total_fee_at_submit=fee_owed,
+        member_count_at_submit=official_count + member_count,
+    )
+    if approved:
+        recalculate_latest_approved_balance(cycle, approved)
+    total_paid = compute_total_paid_for_approved_payments(approved, fee_owed=fee_owed)
+    balance_due = max(0, fee_owed - total_paid)
+    payment_credit = max(0, total_paid - fee_owed)
+    return {
+        "official_count": official_count,
+        "member_count": member_count,
+        "delegate_count": official_count + member_count,
+        "fee_owed": fee_owed,
+        "total_paid": total_paid,
+        "balance_due": balance_due,
+        "payment_credit": payment_credit,
+        "is_fully_paid": bool(approved) and balance_due == 0 and total_paid > 0,
+    }
+
+
+def overall_conference_status(
+    payments: list[ConferencePayment],
+    summary: dict[str, Any],
+) -> str:
+    approved = approved_proofs(payments)
+    pending = pending_proofs(payments)
+    if approved:
+        if summary["balance_due"] > 0:
+            return "partial"
+        return "paid"
+    if pending:
+        return "pending"
+    if payments:
+        return "declined"
+    return "not_submitted"
+
+
+def has_blocking_pending(
+    payments: list[ConferencePayment],
+    *,
+    fee_owed: int,
+) -> bool:
+    pending = pending_proofs(payments)
+    if not pending:
+        return False
+    for payment in pending:
+        if payment.total_amount is None or payment.total_amount <= fee_owed:
+            return True
+    return False
+
+
+async def district_delegate_counts(
     db: AsyncSession,
     conference_id: int,
-    user_id: int,
-    data: ConferencePaymentCreate,
-) -> ConferencePayment:
-    """Create a conference payment record."""
-    stmt = select(CustomUser).where(CustomUser.id == user_id)
-    result = await db.execute(stmt)
-    user = result.scalar_one()
-
-    # Members this official added
-    stmt = select(func.count()).select_from(ConferenceDelegate).where(
-        and_(
-            ConferenceDelegate.conference_id == conference_id,
-            ConferenceDelegate.officials_id == user_id,
-            ConferenceDelegate.members_id.isnot(None),
-        )
-    )
-    result = await db.execute(stmt)
-    member_count = result.scalar() or 0
-
-    # District officials (same set shown as registered officials)
-    stmt = select(func.count()).select_from(CustomUser).where(
-        and_(
-            CustomUser.clergy_district_id == user.clergy_district_id,
+    district_id: int,
+) -> dict[str, int]:
+    official_result = await db.execute(
+        select(func.count())
+        .select_from(CustomUser)
+        .where(
+            CustomUser.clergy_district_id == district_id,
             CustomUser.user_type == UserType.DISTRICT_OFFICIAL,
         )
     )
-    result = await db.execute(stmt)
-    official_count = result.scalar() or 0
+    official_count = official_result.scalar() or 0
 
+    member_result = await db.execute(
+        select(func.count())
+        .select_from(ConferenceDelegate)
+        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+        .where(
+            ConferenceDelegate.conference_id == conference_id,
+            ConferenceDelegate.members_id.isnot(None),
+            CustomUser.clergy_district_id == district_id,
+        )
+    )
+    member_count = member_result.scalar() or 0
     fee = await get_delegate_fee(db)
-    amount = (member_count + official_count) * fee
-    
+    fee_owed = (official_count + member_count) * fee
+    return {
+        "official_count": official_count,
+        "member_count": member_count,
+        "fee_owed": fee_owed,
+        "delegate_fee": fee,
+    }
+
+
+async def get_district_payments(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: int,
+) -> list[ConferencePayment]:
+    result = await db.execute(
+        select(ConferencePayment)
+        .where(
+            ConferencePayment.conference_id == conference_id,
+            ConferencePayment.clergy_district_id == district_id,
+        )
+        .order_by(ConferencePayment.date.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_site_payment_qr_url(db: AsyncSession) -> Optional[str]:
+    result = await db.execute(select(SiteSettings).limit(1))
+    site = result.scalar_one_or_none()
+    if site and site.payment_qr_url:
+        return get_public_file_url(site.payment_qr_url)
+    return None
+
+
+def serialize_conference_proof(payment: ConferencePayment) -> dict[str, Any]:
+    return {
+        "id": payment.id,
+        "file_url": get_public_file_url(payment.proof_path) if payment.proof_path else None,
+        "total_amount": payment.total_amount,
+        "balance_amount": payment.balance_amount,
+        "approved_paid_amount": payment.approved_paid_amount,
+        "status": payment.status.value if payment.status else None,
+        "rejection_note": payment.rejection_note,
+        "payment_reference": payment.payment_reference,
+        "submitted_at": payment.date.isoformat() if payment.date else None,
+        "reviewed_at": payment.reviewed_at.isoformat() if payment.reviewed_at else None,
+        "uploaded_by_id": payment.uploaded_by_id,
+    }
+
+
+async def get_district_payment_ledger(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: int,
+) -> dict[str, Any]:
+    counts = await district_delegate_counts(db, conference_id, district_id)
+    payments = await get_district_payments(db, conference_id, district_id)
+    approved = approved_proofs(payments)
+    summary = build_conference_payment_summary(
+        fee_owed=counts["fee_owed"],
+        official_count=counts["official_count"],
+        member_count=counts["member_count"],
+        approved=approved,
+    )
+    latest_rejection = None
+    for payment in payments:
+        if payment.status == PaymentStatusEnum.DECLINED and payment.rejection_note:
+            latest_rejection = payment.rejection_note
+    return {
+        **counts,
+        **summary,
+        "overall_status": overall_conference_status(payments, summary),
+        "latest_rejection_note": latest_rejection,
+        "has_blocking_pending": has_blocking_pending(payments, fee_owed=counts["fee_owed"]),
+        "qr_url": await get_site_payment_qr_url(db),
+        "submissions": [serialize_conference_proof(p) for p in payments],
+        "payments": payments,
+    }
+
+
+def ledger_api_payload(ledger: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(ledger)
+    payload.pop("payments", None)
+    return payload
+
+
+def overall_status_legacy(status: str) -> Optional[str]:
+    return {
+        "paid": "PAID",
+        "partial": "PARTIAL",
+        "pending": "PENDING",
+        "declined": "DECLINED",
+        "not_submitted": None,
+    }.get(status)
+
+
+async def supersede_stale_pending_payments(
+    db: AsyncSession,
+    payments: list[ConferencePayment],
+    *,
+    fee_owed: int,
+) -> int:
+    stale = [
+        p
+        for p in pending_proofs(payments)
+        if p.total_amount is not None and p.total_amount > fee_owed
+    ]
+    for payment in stale:
+        payment.status = PaymentStatusEnum.DECLINED
+        payment.rejection_note = (
+            "Superseded — conference fee was revised after a delegate update. "
+            "Please submit a new proof for the updated amount."
+        )
+        payment.reviewed_at = now_ist()
+    return len(stale)
+
+
+async def recalculate_district_ledger(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: Optional[int],
+) -> None:
+    if district_id is None:
+        return
+    counts = await district_delegate_counts(db, conference_id, district_id)
+    payments = await get_district_payments(db, conference_id, district_id)
+    approved = approved_proofs(payments)
+    if approved:
+        cycle = SimpleNamespace(total_fee_at_submit=counts["fee_owed"])
+        recalculate_latest_approved_balance(cycle, approved)
+    await supersede_stale_pending_payments(db, payments, fee_owed=counts["fee_owed"])
+
+
+async def create_conference_payment(
+    db: AsyncSession,
+    conference_id: int,
+    user: CustomUser,
+    file: UploadFile,
+    payment_reference: Optional[str] = None,
+) -> ConferencePayment:
+    if not user.clergy_district_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="District official has no district assigned.",
+        )
+
+    await recalculate_district_ledger(db, conference_id, user.clergy_district_id)
+    ledger = await get_district_payment_ledger(db, conference_id, user.clergy_district_id)
+    fee_owed = ledger["fee_owed"]
+
+    if ledger["is_fully_paid"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payment for this district has already been fully approved.",
+        )
+    if fee_owed <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Add delegates before submitting payment.",
+        )
+    if ledger["has_blocking_pending"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "A payment proof is already awaiting admin review. "
+                "Please wait for approval or rejection before submitting another."
+            ),
+        )
+
+    object_key, _ = save_upload_file(file, subdir="conference/payments")
     payment = ConferencePayment(
         conference_id=conference_id,
-        amount_to_pay=amount,
-        uploaded_by_id=user_id,
-        proof_path=data.proof_path,
-        payment_reference=data.payment_reference,
-        status=PaymentStatusEnum.PROOF_UPLOADED if data.proof_path else PaymentStatusEnum.PENDING,
+        clergy_district_id=user.clergy_district_id,
+        amount_to_pay=fee_owed,
+        total_amount=fee_owed,
+        uploaded_by_id=user.id,
+        proof_path=object_key,
+        payment_reference=payment_reference,
+        status=PaymentStatusEnum.PROOF_UPLOADED,
     )
-    
     db.add(payment)
     await db.commit()
     await db.refresh(payment)
-    
     return payment
+
+
+async def approve_conference_payment(
+    db: AsyncSession,
+    payment_id: int,
+    paid_amount: int,
+    admin_id: int,
+    conference_id: Optional[int] = None,
+) -> dict[str, Any]:
+    if paid_amount < 0:
+        raise HTTPException(status_code=400, detail="Paid amount cannot be negative")
+
+    result = await db.execute(
+        select(ConferencePayment).where(ConferencePayment.id == payment_id)
+    )
+    payment = result.scalar_one_or_none()
+    if not payment or (conference_id is not None and payment.conference_id != conference_id):
+        raise HTTPException(status_code=404, detail="Payment submission not found")
+    if payment.status not in PENDING_PROOF_STATUSES:
+        raise HTTPException(status_code=400, detail="Only pending proofs can be approved")
+    if payment.clergy_district_id is None:
+        raise HTTPException(status_code=400, detail="Payment is missing a district")
+
+    counts = await district_delegate_counts(
+        db, payment.conference_id, payment.clergy_district_id
+    )
+    fee_owed = counts["fee_owed"]
+    payments = await get_district_payments(
+        db, payment.conference_id, payment.clergy_district_id
+    )
+    prior_approved = [p for p in approved_proofs(payments) if p.id != payment.id]
+    total_paid_so_far = compute_total_paid_for_approved_payments(
+        prior_approved, fee_owed=fee_owed
+    )
+    current_balance = max(0, fee_owed - total_paid_so_far)
+    if paid_amount > current_balance:
+        raise HTTPException(
+            status_code=400,
+            detail="Paid amount cannot exceed the remaining balance",
+        )
+
+    payment.status = PaymentStatusEnum.PAID
+    payment.approved_paid_amount = paid_amount
+    payment.rejection_note = None
+    payment.reviewed_at = now_ist()
+    payment.reviewed_by_id = admin_id
+
+    all_approved = prior_approved + [payment]
+    cycle = SimpleNamespace(total_fee_at_submit=fee_owed)
+    recalculate_latest_approved_balance(cycle, all_approved)
+    await db.commit()
+
+    return {
+        "message": "Payment approved successfully",
+        "id": payment_id,
+        "paid_amount": paid_amount,
+        "balance_amount": payment.balance_amount,
+    }
+
+
+async def decline_conference_payment(
+    db: AsyncSession,
+    payment_id: int,
+    rejection_note: str,
+    admin_id: int,
+    conference_id: Optional[int] = None,
+) -> dict[str, Any]:
+    if not rejection_note.strip():
+        raise HTTPException(status_code=400, detail="Rejection note is required")
+
+    result = await db.execute(
+        select(ConferencePayment).where(ConferencePayment.id == payment_id)
+    )
+    payment = result.scalar_one_or_none()
+    if not payment or (conference_id is not None and payment.conference_id != conference_id):
+        raise HTTPException(status_code=404, detail="Payment submission not found")
+    if payment.status not in PENDING_PROOF_STATUSES:
+        raise HTTPException(status_code=400, detail="Only pending proofs can be declined")
+
+    payment.status = PaymentStatusEnum.DECLINED
+    payment.rejection_note = rejection_note.strip()
+    payment.reviewed_at = now_ist()
+    payment.reviewed_by_id = admin_id
+    await db.commit()
+    return {"message": "Payment declined", "id": payment_id}
 
 
 # Food Preference Management
@@ -779,91 +1106,135 @@ async def get_all_conference_info(
     return result_dict
 
 
+async def conference_district_ids(
+    db: AsyncSession,
+    conference_id: int,
+) -> list[int]:
+    official_rows = await db.execute(
+        select(CustomUser.clergy_district_id).where(
+            CustomUser.user_type == UserType.DISTRICT_OFFICIAL,
+            CustomUser.clergy_district_id.isnot(None),
+            or_(
+                CustomUser.conference_id == conference_id,
+                CustomUser.id.in_(
+                    select(ConferenceDelegate.officials_id).where(
+                        ConferenceDelegate.conference_id == conference_id
+                    )
+                ),
+            ),
+        )
+    )
+    payment_rows = await db.execute(
+        select(ConferencePayment.clergy_district_id).where(
+            ConferencePayment.conference_id == conference_id,
+            ConferencePayment.clergy_district_id.isnot(None),
+        )
+    )
+    ids = {row[0] for row in official_rows.all() if row[0]}
+    ids.update(row[0] for row in payment_rows.all() if row[0])
+    return sorted(ids)
+
+
 async def get_payment_info(
     db: AsyncSession,
     conference_id: int,
 ) -> Dict[str, Any]:
-    """Get aggregated payment information by district."""
-    # Similar to get_all_conference_info but focused on payments
-    # Implementation would follow the same pattern as get_all_conference_info
-    # but include payment details
-    
-    # Get all delegates
-    stmt = select(ConferenceDelegate).where(
-        ConferenceDelegate.conference_id == conference_id
+    """District ledgers for a conference: fee, approved total, remaining, proofs."""
+    district_ids = await conference_district_ids(db, conference_id)
+    if not district_ids:
+        return {}
+
+    districts = list(
+        (
+            await db.execute(select(ClergyDistrict).where(ClergyDistrict.id.in_(district_ids)))
+        ).scalars().all()
     )
-    result = await db.execute(stmt)
-    delegates = list(result.scalars().all())
-    
-    district_info = defaultdict(lambda: {
-        'officials': [],
-        'members': [],
-        'payments': [],
-        'count_of_officials': 0,
-        'count_of_members': 0,
-    })
-    
-    seen_officials = set()
-    
-    for delegate in delegates:
-        # Get official with district
-        stmt = select(CustomUser).where(CustomUser.id == delegate.officials_id).options(
-            selectinload(CustomUser.clergy_district)
-        )
-        result = await db.execute(stmt)
-        official = result.scalar_one()
-        
-        district_name = official.clergy_district.name if official.clergy_district else 'Unknown District'
-        
-        # Add unique official
-        if official.id not in seen_officials:
-            district_info[district_name]['officials'].append({
-                'name': official.first_name,
-                'phone': official.phone_number,
-                'id': official.id,
-            })
-            district_info[district_name]['count_of_officials'] += 1
-            seen_officials.add(official.id)
-            
-            # Get payments for this official
-            stmt = select(ConferencePayment).where(
-                and_(
-                    ConferencePayment.conference_id == conference_id,
-                    ConferencePayment.uploaded_by_id == official.id
+    district_by_id = {d.id: d for d in districts}
+
+    officials = list(
+        (
+            await db.execute(
+                select(CustomUser).where(
+                    CustomUser.clergy_district_id.in_(district_ids),
+                    CustomUser.user_type == UserType.DISTRICT_OFFICIAL,
                 )
-            ).distinct()
-            result = await db.execute(stmt)
-            payments = list(result.scalars().all())
-            
-            for payment in payments:
-                district_info[district_name]['payments'].append({
-                    'amount_to_pay': float(payment.amount_to_pay) if payment.amount_to_pay else 0,
-                    'uploaded_by': official.first_name,
-                    'date': payment.date,
-                    'status': payment.status,
-                    'proof_path': payment.proof_path,
-                    'payment_reference': payment.payment_reference,
-                })
-        
-        # Add member if present
-        if delegate.members_id:
-            stmt = select(UnitMembers).where(UnitMembers.id == delegate.members_id)
-            result = await db.execute(stmt)
-            member = result.scalar_one()
-            
-            district_info[district_name]['members'].append({
-                'name': member.name,
-                'phone': member.number,
-                'id': member.id,
+            )
+        ).scalars().all()
+    )
+    officials_by_district: dict[int, list[CustomUser]] = defaultdict(list)
+    for official in officials:
+        if official.clergy_district_id is not None:
+            officials_by_district[official.clergy_district_id].append(official)
+
+    member_rows = (
+        await db.execute(
+            select(UnitMembers, CustomUser.clergy_district_id)
+            .join(ConferenceDelegate, ConferenceDelegate.members_id == UnitMembers.id)
+            .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+            .where(
+                ConferenceDelegate.conference_id == conference_id,
+                ConferenceDelegate.members_id.isnot(None),
+                CustomUser.clergy_district_id.in_(district_ids),
+            )
+        )
+    ).all()
+    members_by_district: dict[int, list[UnitMembers]] = defaultdict(list)
+    for member, district_id in member_rows:
+        members_by_district[district_id].append(member)
+
+    result_dict: dict[str, Any] = {}
+    for district_id in district_ids:
+        district = district_by_id.get(district_id)
+        district_name = district.name if district else f"District {district_id}"
+        ledger = await get_district_payment_ledger(db, conference_id, district_id)
+        uploader_ids = {
+            sub["uploaded_by_id"] for sub in ledger["submissions"] if sub["uploaded_by_id"]
+        }
+        uploader_names: dict[int, Optional[str]] = {}
+        if uploader_ids:
+            uploaders = list(
+                (
+                    await db.execute(select(CustomUser).where(CustomUser.id.in_(uploader_ids)))
+                ).scalars().all()
+            )
+            uploader_names = {u.id: u.first_name for u in uploaders}
+
+        payments_out = []
+        for sub in ledger["submissions"]:
+            payments_out.append({
+                "id": sub["id"],
+                "amount_to_pay": sub["total_amount"] or 0,
+                "uploaded_by": uploader_names.get(sub["uploaded_by_id"]),
+                "date": sub["submitted_at"],
+                "status": sub["status"],
+                "proof_path": sub["file_url"],
+                "file_url": sub["file_url"],
+                "payment_reference": sub["payment_reference"],
+                "approved_paid_amount": sub["approved_paid_amount"],
+                "balance_amount": sub["balance_amount"],
+                "rejection_note": sub["rejection_note"],
             })
-            district_info[district_name]['count_of_members'] += 1
-    
-    fee = await get_delegate_fee(db)
-    result_dict = {}
-    for district, info in district_info.items():
-        info['amount_due'] = (
-            info['count_of_officials'] + info['count_of_members']
-        ) * fee
-        result_dict[district] = info
+
+        result_dict[district_name] = {
+            "district_id": district_id,
+            "officials": [
+                {"id": o.id, "name": o.first_name, "phone": o.phone_number}
+                for o in officials_by_district[district_id]
+            ],
+            "members": [
+                {"id": m.id, "name": m.name, "phone": m.number}
+                for m in members_by_district[district_id]
+            ],
+            "payments": payments_out,
+            "count_of_officials": ledger["official_count"],
+            "count_of_members": ledger["member_count"],
+            "amount_due": ledger["fee_owed"],
+            "fee_owed": ledger["fee_owed"],
+            "total_paid": ledger["total_paid"],
+            "balance_due": ledger["balance_due"],
+            "payment_credit": ledger["payment_credit"],
+            "overall_status": ledger["overall_status"],
+            "latest_rejection_note": ledger["latest_rejection_note"],
+        }
 
     return result_dict

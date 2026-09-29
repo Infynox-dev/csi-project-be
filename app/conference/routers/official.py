@@ -1,20 +1,18 @@
 """Conference official router - endpoints for district officials."""
 
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, and_, func
+from typing import Optional
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.common.db import get_async_db
 from app.common.security import get_current_user
 from app.auth.models import CustomUser, UnitMembers, UserType
-from app.conference.models import ConferenceDelegate, ConferencePayment, FoodPreference
+from app.conference.models import ConferenceDelegate, FoodPreference
 from app.conference.schemas import (
     FoodPreferenceCreate,
     FoodPreferenceResponse,
-    ConferencePaymentCreate,
-    ConferencePaymentResponse,
 )
 from app.conference import service as conference_service
 
@@ -182,20 +180,13 @@ async def view_delegates(
     
     delegates_count = len(delegate_members) + len(delegate_officials)
     max_count = current_user.conference_official_count + current_user.conference_member_count
-    fee = await conference_service.get_delegate_fee(db)
-    # Fee = per-delegate rate × (district officials + members added as delegates)
-    amount_to_pay = delegates_count * fee
-    
-    # Get payment status (get the latest payment)
-    stmt = select(ConferencePayment).where(
-        and_(
-            ConferencePayment.conference_id == current_user.conference_id,
-            ConferencePayment.uploaded_by_id == current_user.id
+    ledger = None
+    if current_user.clergy_district_id:
+        ledger = await conference_service.get_district_payment_ledger(
+            db, current_user.conference_id, current_user.clergy_district_id
         )
-    ).order_by(ConferencePayment.date.desc()).limit(1)
-    result = await db.execute(stmt)
-    payment = result.scalar_one_or_none()
-    
+        await db.commit()
+
     # Get food preference
     stmt = select(FoodPreference).where(
         and_(
@@ -226,8 +217,15 @@ async def view_delegates(
         ],
         "delegates_count": delegates_count,
         "max_count": max_count,
-        "payment_status": payment.status if payment else None,
-        "amount_to_pay": amount_to_pay,
+        "payment_status": (
+            conference_service.overall_status_legacy(ledger["overall_status"])
+            if ledger
+            else None
+        ),
+        "amount_to_pay": ledger["fee_owed"] if ledger else 0,
+        "total_paid": ledger["total_paid"] if ledger else 0,
+        "balance_due": ledger["balance_due"] if ledger else 0,
+        "overall_status": ledger["overall_status"] if ledger else "not_submitted",
         "food_preference": {
             "veg_count": food_preference.veg_count if food_preference else 0,
             "non_veg_count": food_preference.non_veg_count if food_preference else 0,
@@ -255,27 +253,56 @@ async def remove_delegate_member(
     return {"message": "Delegate member removed successfully"}
 
 
-@router.post("/payment", response_model=dict)
-async def make_payment(
-    data: ConferencePaymentCreate,
+@router.get("/payment", response_model=dict)
+async def get_district_payment(
     current_user: CustomUser = Depends(get_current_official),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Upload payment proof."""
+    """District conference ledger plus the shared Units UPI QR."""
     if not current_user.conference_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No conference assigned"
+            detail="No conference assigned",
         )
-    
-    # Set conference_id from current user
-    data.conference_id = current_user.conference_id
-    
-    payment = await conference_service.create_conference_payment(
-        db, current_user.conference_id, current_user.id, data
+    if not current_user.clergy_district_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="District official has no district assigned.",
+        )
+
+    ledger = await conference_service.get_district_payment_ledger(
+        db, current_user.conference_id, current_user.clergy_district_id
     )
-    
-    return {"message": "Payment data uploaded successfully", "payment_id": payment.id}
+    await db.commit()
+    return conference_service.ledger_api_payload(ledger)
+
+
+@router.post("/payment", response_model=dict)
+async def make_payment(
+    file: UploadFile = File(..., description="Payment proof screenshot or PDF"),
+    payment_reference: Optional[str] = Form(None),
+    current_user: CustomUser = Depends(get_current_official),
+    db: AsyncSession = Depends(get_async_db),
+):
+    """Upload a district payment proof against the shared Units QR."""
+    if not current_user.conference_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No conference assigned",
+        )
+
+    payment = await conference_service.create_conference_payment(
+        db,
+        current_user.conference_id,
+        current_user,
+        file,
+        payment_reference=payment_reference,
+    )
+    return {
+        "message": "Payment proof submitted successfully. Awaiting admin review.",
+        "payment_id": payment.id,
+        "status": payment.status.value if payment.status else None,
+    }
 
 
 @router.post("/food-preference", response_model=FoodPreferenceResponse)

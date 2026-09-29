@@ -675,53 +675,86 @@ def create_payment_info_excel(
     Returns:
         BytesIO object containing the Excel file
     """
-    headers = ["District", "Type", "Name", "Phone", "Count of Members", "Count of Officials"]
+    headers = [
+        "District",
+        "Type",
+        "Name",
+        "Phone",
+        "Count of Members",
+        "Count of Officials",
+        "Fee Owed",
+        "Total Paid",
+        "Balance Due",
+        "Overall Status",
+        "Proof Status",
+        "Paid Amount",
+    ]
     rows = []
-    
+
     for district, info in district_info.items():
-        # Add officials
-        for official in info.get('officials', []):
+        for official in info.get("officials", []):
             rows.append([
                 district,
                 "Official",
-                official.get('name', ''),
-                official.get('phone', ''),
-                '',
-                '',
+                official.get("name", ""),
+                official.get("phone", ""),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
             ])
-        
-        # Add members
-        for member in info.get('members', []):
+
+        for member in info.get("members", []):
             rows.append([
                 district,
                 "Member",
-                member.get('name', ''),
-                member.get('phone', ''),
-                '',
-                '',
+                member.get("name", ""),
+                member.get("phone", ""),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
             ])
-        
-        # Add counts
+
         rows.append([
             district,
-            "Counts",
-            '',
-            '',
-            info.get('count_of_members', 0),
-            info.get('count_of_officials', 0),
+            "Ledger",
+            "",
+            "",
+            info.get("count_of_members", 0),
+            info.get("count_of_officials", 0),
+            info.get("fee_owed", info.get("amount_due", 0)),
+            info.get("total_paid", 0),
+            info.get("balance_due", 0),
+            info.get("overall_status", ""),
+            "",
+            "",
         ])
-        
-        # Add payments
-        for payment in info.get('payments', []):
+
+        for payment in info.get("payments", []):
             rows.append([
                 district,
                 "Payment",
-                str(payment.get('amount_to_pay', '')),
-                payment.get('uploaded_by', ''),
-                payment.get('date', ''),
-                payment.get('status', ''),
+                payment.get("uploaded_by", ""),
+                "",
+                "",
+                "",
+                payment.get("amount_to_pay", ""),
+                payment.get("approved_paid_amount", ""),
+                payment.get("balance_amount", ""),
+                "",
+                payment.get("status", ""),
+                payment.get("approved_paid_amount", ""),
             ])
-    
+
     return create_styled_excel(headers, rows, "Payment Info")
 
 
