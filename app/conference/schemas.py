@@ -15,14 +15,6 @@ class ConferenceStatus(str, Enum):
     COMPLETED = "Completed"
 
 
-class PaymentStatus(str, Enum):
-    """Payment status enum."""
-    
-    PAID = "PAID"
-    NOT_PAID = "NOT PAID"
-    PENDING = "PENDING"
-
-
 # Conference Schemas
 class ConferenceBase(BaseModel):
     """Base schema for conferences."""
@@ -95,37 +87,6 @@ class ConferenceDelegateResponse(ConferenceDelegateBase):
     model_config = ConfigDict(from_attributes=True)
     
     id: int
-
-
-# Conference Payment Schemas
-class ConferencePaymentBase(BaseModel):
-    """Base schema for conference payments."""
-    
-    conference_id: int = Field(..., gt=0)
-    amount_to_pay: Optional[float] = Field(None, gt=0)
-
-
-class ConferencePaymentCreate(BaseModel):
-    """Create schema for conference payments."""
-    
-    conference_id: Optional[int] = Field(None, gt=0)  # Optional - set from user session
-    amount_to_pay: Optional[float] = Field(None, ge=0)
-    proof_path: Optional[str] = Field(None, description="File path to payment proof")
-    payment_reference: Optional[str] = Field(None, description="Payment reference number")
-    status: PaymentStatus = Field(default=PaymentStatus.PENDING)
-
-
-class ConferencePaymentResponse(ConferencePaymentBase):
-    """Response schema for conference payments."""
-    
-    model_config = ConfigDict(from_attributes=True)
-    
-    id: int
-    uploaded_by_id: Optional[int]
-    proof_path: Optional[str]
-    payment_reference: Optional[str]
-    date: datetime
-    status: Optional[str]
 
 
 # Food Preference Schemas
