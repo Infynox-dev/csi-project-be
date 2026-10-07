@@ -2,7 +2,7 @@
 
 from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select, and_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -69,10 +69,29 @@ async def view_conference(
             db, current_user.conference_id, current_user.clergy_district_id
         )
 
-    already_added = select(ConferenceDelegate.members_id).where(
-        ConferenceDelegate.conference_id == current_user.conference_id,
-        ConferenceDelegate.members_id.isnot(None),
+    added_rows = await db.execute(
+        select(
+            ConferenceDelegate.members_id,
+            ConferenceDelegate.attendee_role,
+            CustomUser.phone_number,
+        )
+        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+        .where(
+            ConferenceDelegate.conference_id == current_user.conference_id,
+            CustomUser.clergy_district_id == current_user.clergy_district_id,
+        )
     )
+    added_by_member: dict[int, str] = {}
+    official_phones: set[str] = set()
+    for members_id, role, phone in added_rows.all():
+        kind = role if role in ("official", "delegate") else (
+            "official" if members_id is None else "delegate"
+        )
+        if members_id is not None:
+            added_by_member[members_id] = kind
+        elif phone:
+            official_phones.add(phone.strip())
+
     stmt = (
         select(
             UnitMembers.id,
@@ -83,13 +102,7 @@ async def view_conference(
         )
         .join(CustomUser, UnitMembers.registered_user_id == CustomUser.id)
         .outerjoin(UnitName, CustomUser.unit_name_id == UnitName.id)
-        .where(
-            and_(
-                CustomUser.unit_name.has(clergy_district_id=current_user.clergy_district_id),
-                UnitMembers.number != current_user.phone_number,
-                UnitMembers.id.not_in(already_added),
-            )
-        )
+        .where(CustomUser.unit_name.has(clergy_district_id=current_user.clergy_district_id))
         .order_by(UnitMembers.name)
     )
     result = await db.execute(stmt)
@@ -120,6 +133,8 @@ async def view_conference(
                 "number": m.number,
                 "gender": m.gender,
                 "unit_name": m.unit_name,
+                "registered_as": added_by_member.get(m.id)
+                or ("official" if (m.number or "").strip() in official_phones else None),
             }
             for m in unit_members
         ],
