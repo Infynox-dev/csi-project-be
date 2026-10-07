@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 from collections import defaultdict
 from sqlalchemy import select, and_, or_, func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 from fastapi import HTTPException, UploadFile, status
 
 from app.auth.models import (
@@ -32,6 +32,7 @@ from app.conference.schemas import (
     ConferenceSettingsUpdate,
 )
 from app.common.security import get_password_hash
+from app.common.phone_utils import phone_lookup_variants
 from app.common.datetime_utils import now_ist
 from app.common.storage import save_upload_file
 from app.admin.models import SiteSettings
@@ -210,6 +211,235 @@ async def get_active_conferences(
     return list(result.scalars().all())
 
 
+def _default_official_password(phone: str) -> str:
+    """Default login password: 10-digit national number when possible."""
+    trimmed = (phone or "").strip()
+    for variant in phone_lookup_variants(trimmed):
+        if variant.isdigit() and len(variant) == 10:
+            return variant
+    return trimmed
+
+
+def _apply_member_to_district_official(
+    official: CustomUser,
+    member: UnitMembers,
+    *,
+    conference_id: int,
+    conference_official_count: int,
+    conference_member_count: int,
+) -> None:
+    phone = str(member.number).strip()
+    official.conference_id = conference_id
+    official.first_name = member.name
+    official.phone_number = phone
+    official.conference_official_count = conference_official_count
+    official.conference_member_count = conference_member_count
+    official.is_active = True
+    official.hashed_password = get_password_hash(_default_official_password(phone))
+
+
+async def _ensure_official_conference_rows(
+    db: AsyncSession,
+    *,
+    conference_id: int,
+    official_user_id: int,
+) -> None:
+    stmt = select(ConferenceRegistrationData).where(
+        ConferenceRegistrationData.district_official_id == official_user_id
+    )
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is None:
+        db.add(ConferenceRegistrationData(
+            district_official_id=official_user_id,
+            status="Registration Started",
+        ))
+
+    stmt = select(ConferenceDelegate).where(
+        and_(
+            ConferenceDelegate.conference_id == conference_id,
+            ConferenceDelegate.officials_id == official_user_id,
+            ConferenceDelegate.members_id.is_(None),
+        )
+    )
+    result = await db.execute(stmt)
+    if result.scalar_one_or_none() is None:
+        db.add(ConferenceDelegate(
+            conference_id=conference_id,
+            officials_id=official_user_id,
+            members_id=None,
+            attendee_role="official",
+        ))
+
+
+def attendee_role_of(attendee_role: Optional[str], members_id: Optional[int]) -> str:
+    if attendee_role in ("official", "delegate"):
+        return attendee_role
+    return "official" if members_id is None else "delegate"
+
+
+def ensure_attendee_slot(
+    role: str,
+    official_count: int,
+    official_limit: int,
+    member_count: int,
+    member_limit: int,
+) -> None:
+    if role == "official" and official_count >= official_limit:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Official limit reached for this district",
+        )
+    if role == "delegate" and member_count >= member_limit:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Delegate limit reached for this district",
+        )
+    if role not in ("official", "delegate"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid attendee role",
+        )
+
+
+async def ensure_district_official_rows(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: int,
+) -> None:
+    result = await db.execute(
+        select(CustomUser.id).where(
+            CustomUser.clergy_district_id == district_id,
+            CustomUser.user_type == UserType.DISTRICT_OFFICIAL,
+            CustomUser.conference_id == conference_id,
+        )
+    )
+    for (user_id,) in result.all():
+        await _ensure_official_conference_rows(
+            db, conference_id=conference_id, official_user_id=user_id
+        )
+
+
+async def district_role_counts(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: int,
+) -> tuple[int, int]:
+    result = await db.execute(
+        select(ConferenceDelegate.attendee_role, ConferenceDelegate.members_id)
+        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+        .where(
+            ConferenceDelegate.conference_id == conference_id,
+            CustomUser.clergy_district_id == district_id,
+        )
+    )
+    official_count = 0
+    member_count = 0
+    for role, members_id in result.all():
+        if attendee_role_of(role, members_id) == "official":
+            official_count += 1
+        else:
+            member_count += 1
+    return official_count, member_count
+
+
+def _attendee_payload(
+    delegate: ConferenceDelegate,
+    *,
+    name: Optional[str],
+    phone: Optional[str],
+    gender: Optional[str],
+    unit_name: Optional[str],
+) -> dict[str, Any]:
+    clean_name = (name or "").strip() or None
+    clean_phone = (phone or "").strip() or None
+    return {
+        "id": delegate.id,
+        "member_id": delegate.members_id,
+        "name": clean_name,
+        "phone": clean_phone,
+        "number": clean_phone,
+        "gender": gender,
+        "unit_name": unit_name,
+        "food_preference": delegate.food_preference,
+        "accommodation_required": delegate.accommodation_required,
+        "removable": delegate.members_id is not None,
+    }
+
+
+async def list_district_attendees(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Officials and delegates for a district, with unit and preferences."""
+    await ensure_district_official_rows(db, conference_id, district_id)
+    member_owner = aliased(CustomUser)
+    result = await db.execute(
+        select(ConferenceDelegate, UnitMembers, UnitName.name, CustomUser)
+        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+        .outerjoin(UnitMembers, ConferenceDelegate.members_id == UnitMembers.id)
+        .outerjoin(member_owner, UnitMembers.registered_user_id == member_owner.id)
+        .outerjoin(UnitName, member_owner.unit_name_id == UnitName.id)
+        .where(
+            ConferenceDelegate.conference_id == conference_id,
+            CustomUser.clergy_district_id == district_id,
+        )
+        .order_by(ConferenceDelegate.id)
+    )
+    rows = result.all()
+
+    phones = [
+        owner.phone_number
+        for delegate, member, _unit, owner in rows
+        if member is None and owner.phone_number
+    ]
+    by_phone: dict[str, tuple[UnitMembers, Optional[str]]] = {}
+    if phones:
+        phone_rows = await db.execute(
+            select(UnitMembers, UnitName.name)
+            .join(CustomUser, UnitMembers.registered_user_id == CustomUser.id)
+            .outerjoin(UnitName, CustomUser.unit_name_id == UnitName.id)
+            .where(
+                UnitMembers.number.in_(phones),
+                CustomUser.unit_name.has(clergy_district_id=district_id),
+            )
+        )
+        for member, unit_name in phone_rows.all():
+            if member.number and member.number not in by_phone:
+                by_phone[member.number] = (member, unit_name)
+
+    officials: list[dict[str, Any]] = []
+    delegates: list[dict[str, Any]] = []
+    for delegate, member, unit_name, owner in rows:
+        if member is None:
+            matched = by_phone.get(owner.phone_number or "")
+            if matched:
+                member, unit_name = matched
+            payload = _attendee_payload(
+                delegate,
+                name=owner.first_name,
+                phone=owner.phone_number,
+                gender=member.gender if member else None,
+                unit_name=unit_name,
+            )
+            # Login account row is not a picked member, even if we matched one for display.
+            payload["member_id"] = None
+            payload["removable"] = False
+        else:
+            payload = _attendee_payload(
+                delegate,
+                name=member.name,
+                phone=member.number,
+                gender=member.gender,
+                unit_name=unit_name,
+            )
+        if attendee_role_of(delegate.attendee_role, delegate.members_id) == "official":
+            officials.append(payload)
+        else:
+            delegates.append(payload)
+    return officials, delegates
+
+
 # District Official Management
 async def add_conference_delegate_official(
     db: AsyncSession,
@@ -272,13 +502,6 @@ async def add_conference_delegate_official(
     result = await db.execute(stmt)
     existing_official = result.scalar_one_or_none()
     
-    if existing_official:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"District '{district.name}' already has an official for this conference. "
-                   f"Use the update endpoint to modify or reset password."
-        )
-    
     # Determine max conference member count based on district
     under_30_list = ['ADOOR', 'KOTTAYAM', 'KUMPALAMPOIKA', 'MALLAPPALLY', 'MAVELIKKARA', 'PALLOM', 'THIRUVALLA']
     under_25_list = ['ELANTHOOR', 'EATTUMANOOR', 'KODUKULANJI', 'MUNDAKKAYAM', 'PUNNAVELY']
@@ -288,6 +511,28 @@ async def add_conference_delegate_official(
         max_conference_member_count = 25
     elif district.name in under_25_list:
         max_conference_member_count = 20
+
+    default_official_count = 5
+
+    if existing_official:
+        _apply_member_to_district_official(
+            existing_official,
+            member,
+            conference_id=conference_id,
+            conference_official_count=default_official_count,
+            conference_member_count=max_conference_member_count,
+        )
+        await db.flush()
+        await _ensure_official_conference_rows(
+            db,
+            conference_id=conference_id,
+            official_user_id=existing_official.id,
+        )
+        await db.flush()
+        await recalculate_district_ledger(db, conference_id, member_district_id)
+        await db.commit()
+        await db.refresh(existing_official)
+        return existing_official
     
     # Reuse User-Management district official if username already exists for this district
     stmt = select(CustomUser).where(CustomUser.username == district.name)
@@ -304,57 +549,37 @@ async def add_conference_delegate_official(
                 detail=f"Username '{district.name}' is already in use"
             )
         official_user = existing_username
-        official_user.conference_id = conference_id
-        official_user.first_name = member.name
-        official_user.phone_number = str(member.number)
-        official_user.conference_official_count = 5
-        official_user.conference_member_count = max_conference_member_count
-        official_user.is_active = True
-        official_user.hashed_password = get_password_hash(str(member.number))
+        _apply_member_to_district_official(
+            official_user,
+            member,
+            conference_id=conference_id,
+            conference_official_count=default_official_count,
+            conference_member_count=max_conference_member_count,
+        )
         await db.flush()
     else:
-        # Create official user with DISTRICT NAME as username
+        phone = str(member.number).strip()
         official_user = CustomUser(
             username=district.name,
             email=f"{district.name.lower().replace(' ', '_')}@district.local",
             first_name=member.name,
-            phone_number=str(member.number),
+            phone_number=phone,
             conference_id=conference_id,
             clergy_district_id=member_district_id,
-            conference_official_count=5,
+            conference_official_count=default_official_count,
             conference_member_count=max_conference_member_count,
             user_type=UserType.DISTRICT_OFFICIAL,
-            hashed_password=get_password_hash(str(member.number)),
+            hashed_password=get_password_hash(_default_official_password(phone)),
             is_active=True,
         )
         db.add(official_user)
         await db.flush()
 
-    # Ensure registration + official delegate rows exist for this conference
-    stmt = select(ConferenceRegistrationData).where(
-        ConferenceRegistrationData.district_official_id == official_user.id
+    await _ensure_official_conference_rows(
+        db,
+        conference_id=conference_id,
+        official_user_id=official_user.id,
     )
-    result = await db.execute(stmt)
-    if result.scalar_one_or_none() is None:
-        db.add(ConferenceRegistrationData(
-            district_official_id=official_user.id,
-            status="Registration Started",
-        ))
-
-    stmt = select(ConferenceDelegate).where(
-        and_(
-            ConferenceDelegate.conference_id == conference_id,
-            ConferenceDelegate.officials_id == official_user.id,
-            ConferenceDelegate.members_id.is_(None),
-        )
-    )
-    result = await db.execute(stmt)
-    if result.scalar_one_or_none() is None:
-        db.add(ConferenceDelegate(
-            conference_id=conference_id,
-            officials_id=official_user.id,
-            members_id=None,
-        ))
 
     await db.flush()
     await recalculate_district_ledger(db, conference_id, member_district_id)
@@ -450,6 +675,10 @@ async def add_conference_delegate_member(
     conference_id: int,
     member_id: int,
     official_user_id: int,
+    *,
+    role: str = "delegate",
+    food_preference: Optional[str] = None,
+    accommodation_required: Optional[bool] = None,
 ) -> ConferenceDelegate:
     """
     Add a member as a conference delegate.
@@ -484,31 +713,48 @@ async def add_conference_delegate_member(
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Member is already a delegate"
+            detail="Member is already registered for this conference"
         )
-    
-    # Check delegate count limits
-    stmt = select(func.count()).select_from(ConferenceDelegate).where(
-        and_(
-            ConferenceDelegate.conference_id == conference_id,
-            ConferenceDelegate.officials_id == official_user_id,
-            ConferenceDelegate.members_id.isnot(None)
+
+    member_result = await db.execute(
+        select(UnitMembers.id)
+        .join(CustomUser, UnitMembers.registered_user_id == CustomUser.id)
+        .where(
+            UnitMembers.id == member_id,
+            CustomUser.unit_name.has(clergy_district_id=official.clergy_district_id),
         )
     )
-    result = await db.execute(stmt)
-    current_count = result.scalar()
-    
-    if current_count >= official.conference_member_count:
+    if member_result.scalar_one_or_none() is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Maximum delegate count reached"
+            detail="Member is not in your district",
         )
-    
-    # Create delegate
+
+    if official.clergy_district_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="District official has no district assigned.",
+        )
+
+    await ensure_district_official_rows(db, conference_id, official.clergy_district_id)
+    official_count, member_count = await district_role_counts(
+        db, conference_id, official.clergy_district_id
+    )
+    ensure_attendee_slot(
+        role,
+        official_count,
+        official.conference_official_count or 0,
+        member_count,
+        official.conference_member_count or 0,
+    )
+
     delegate = ConferenceDelegate(
         conference_id=conference_id,
         officials_id=official_user_id,
         members_id=member_id,
+        attendee_role=role,
+        food_preference=food_preference,
+        accommodation_required=accommodation_required,
     )
     
     db.add(delegate)
@@ -526,6 +772,8 @@ async def remove_conference_delegate_member(
     db: AsyncSession,
     member_id: int,
     conference_id: int,
+    *,
+    district_id: Optional[int] = None,
 ) -> bool:
     """Remove a member from conference delegates."""
     stmt = select(ConferenceDelegate).where(
@@ -542,15 +790,93 @@ async def remove_conference_delegate_member(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Delegate member not found"
         )
-    
+
+    return await _delete_attendee_row(db, delegate, conference_id, district_id)
+
+
+async def remove_conference_attendee(
+    db: AsyncSession,
+    delegate_id: int,
+    conference_id: int,
+    district_id: int,
+) -> bool:
+    result = await db.execute(
+        select(ConferenceDelegate).where(
+            ConferenceDelegate.id == delegate_id,
+            ConferenceDelegate.conference_id == conference_id,
+        )
+    )
+    delegate = result.scalar_one_or_none()
+    if not delegate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attendee not found",
+        )
+    return await _delete_attendee_row(db, delegate, conference_id, district_id)
+
+
+async def update_attendee_preferences(
+    db: AsyncSession,
+    delegate_id: int,
+    conference_id: int,
+    district_id: int,
+    *,
+    food_preference: Optional[str],
+    accommodation_required: Optional[bool],
+) -> ConferenceDelegate:
+    result = await db.execute(
+        select(ConferenceDelegate).where(
+            ConferenceDelegate.id == delegate_id,
+            ConferenceDelegate.conference_id == conference_id,
+        )
+    )
+    delegate = result.scalar_one_or_none()
+    if not delegate:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attendee not found",
+        )
+    owner = await db.execute(
+        select(CustomUser.clergy_district_id).where(CustomUser.id == delegate.officials_id)
+    )
+    if owner.scalar_one_or_none() != district_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attendee not found",
+        )
+    delegate.food_preference = food_preference
+    delegate.accommodation_required = accommodation_required
+    await db.commit()
+    await db.refresh(delegate)
+    return delegate
+
+
+async def _delete_attendee_row(
+    db: AsyncSession,
+    delegate: ConferenceDelegate,
+    conference_id: int,
+    district_id: Optional[int],
+) -> bool:
+    if delegate.members_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The district conference official account cannot be removed here",
+        )
+
     official_result = await db.execute(
         select(CustomUser.clergy_district_id).where(CustomUser.id == delegate.officials_id)
     )
-    district_id = official_result.scalar_one_or_none()
+    owner_district_id = official_result.scalar_one_or_none()
+    if district_id is not None and owner_district_id != district_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attendee not found",
+        )
     await db.delete(delegate)
     await db.flush()
-    if district_id is not None:
-        await recalculate_district_ledger(db, conference_id, district_id)
+    ledger_district = district_id if district_id is not None else owner_district_id
+    if ledger_district is not None:
+        await recalculate_district_ledger(db, conference_id, ledger_district)
     await db.commit()
 
     return True
@@ -631,27 +957,10 @@ async def district_delegate_counts(
     conference_id: int,
     district_id: int,
 ) -> dict[str, int]:
-    official_result = await db.execute(
-        select(func.count())
-        .select_from(CustomUser)
-        .where(
-            CustomUser.clergy_district_id == district_id,
-            CustomUser.user_type == UserType.DISTRICT_OFFICIAL,
-        )
+    await ensure_district_official_rows(db, conference_id, district_id)
+    official_count, member_count = await district_role_counts(
+        db, conference_id, district_id
     )
-    official_count = official_result.scalar() or 0
-
-    member_result = await db.execute(
-        select(func.count())
-        .select_from(ConferenceDelegate)
-        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
-        .where(
-            ConferenceDelegate.conference_id == conference_id,
-            ConferenceDelegate.members_id.isnot(None),
-            CustomUser.clergy_district_id == district_id,
-        )
-    )
-    member_count = member_result.scalar() or 0
     fee = await get_delegate_fee(db)
     fee_owed = (official_count + member_count) * fee
     return {
@@ -1014,9 +1323,14 @@ async def get_all_conference_info(
         
         district_name = official.clergy_district.name if official.clergy_district else 'Unknown District'
         official_district_id = official.clergy_district_id
+        role = attendee_role_of(delegate.attendee_role, delegate.members_id)
+        if delegate.food_preference == "veg":
+            district_info[district_name]['veg_count'] += 1
+        elif delegate.food_preference == "non-veg":
+            district_info[district_name]['non_veg_count'] += 1
         
         # Add unique officials
-        if official.id not in district_info[district_name]['seen_officials']:
+        if delegate.members_id is None and official.id not in district_info[district_name]['seen_officials']:
             # Get official's unit info
             stmt = select(UnitMembers).where(
                 and_(
@@ -1025,22 +1339,18 @@ async def get_all_conference_info(
                         CustomUser.unit_name.has(UnitName.clergy_district_id == official_district_id)
                     )
                 )
+            ).options(
+                selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name)
             ).limit(1)
             result = await db.execute(stmt)
             unit_member_official = result.scalar_one_or_none()
             
-            if unit_member_official:
-                stmt = select(UnitName).where(
-                    UnitName.id == unit_member_official.registered_user.unit_name_id
-                )
-                result = await db.execute(stmt)
-                unit_name_obj = result.scalar_one()
-                
+            if unit_member_official and unit_member_official.registered_user.unit_name:
                 district_info[district_name]['officials'].append({
                     'name': official.first_name,
                     'phone': official.phone_number,
                     'id': official.id,
-                    'unit': unit_name_obj.name,
+                    'unit': unit_member_official.registered_user.unit_name.name,
                     'gender': unit_member_official.gender,
                 })
                 
@@ -1051,24 +1361,30 @@ async def get_all_conference_info(
                 elif unit_member_official.gender in ['F', 'Female']:
                     district_info[district_name]['count_of_female_officials'] += 1
         
-        # Get food preferences
-        stmt = select(FoodPreference).where(
-            and_(
-                FoodPreference.conference_id == conference_id,
-                FoodPreference.uploaded_by_id.in_(
-                    select(CustomUser.id).where(CustomUser.clergy_district_id == official_district_id)
-                )
-            )
-        ).order_by(FoodPreference.created_at.desc())
-        result = await db.execute(stmt)
-        food_pref = result.scalar_one_or_none()
-        
-        if food_pref:
-            district_info[district_name]['veg_count'] = food_pref.veg_count or 0
-            district_info[district_name]['non_veg_count'] = food_pref.non_veg_count or 0
-        
         # Add member if present
-        if delegate.members_id:
+        if delegate.members_id and role == "official":
+            stmt = select(UnitMembers).where(UnitMembers.id == delegate.members_id).options(
+                selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name)
+            )
+            result = await db.execute(stmt)
+            member = result.scalar_one()
+            unit = (
+                member.registered_user.unit_name.name
+                if member.registered_user and member.registered_user.unit_name
+                else None
+            )
+            district_info[district_name]['officials'].append({
+                'name': member.name,
+                'phone': member.number,
+                'id': member.id,
+                'unit': unit,
+                'gender': member.gender,
+            })
+            if member.gender == 'M':
+                district_info[district_name]['count_of_male_officials'] += 1
+            elif member.gender in ['F', 'Female']:
+                district_info[district_name]['count_of_female_officials'] += 1
+        elif delegate.members_id:
             stmt = select(UnitMembers).where(UnitMembers.id == delegate.members_id).options(
                 selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name)
             )
@@ -1108,6 +1424,7 @@ async def get_all_conference_info(
     for district, info in district_info.items():
         info_copy = dict(info)
         info_copy.pop('seen_officials', None)
+        info_copy['count_of_officials'] = len(info_copy['officials'])
         result_dict[district] = info_copy
     
     return result_dict

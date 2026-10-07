@@ -230,7 +230,8 @@ async def add_district_official(
     The username will be the DISTRICT NAME (e.g., 'THIRUVALLA', 'ADOOR').
     This enables district-wise login for Kalamela and Conference modules.
     
-    Default password is the official's phone number.
+    Default password is the selected member's phone number (10-digit).
+    Re-adding the same district for a conference updates the linked member and resets the password.
     """
     official = await conference_service.add_conference_delegate_official(
         db, data.conference_id, data
@@ -289,11 +290,23 @@ async def view_district_members(
     stmt = (
         select(UnitMembers)
         .join(CustomUser, UnitMembers.registered_user_id == CustomUser.id)
-        .options(*MEMBER_RESIDENCE_LOAD_OPTIONS)
+        .options(
+            selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name),
+            *MEMBER_RESIDENCE_LOAD_OPTIONS,
+        )
         .where(CustomUser.unit_name.has(clergy_district_id=district_id))
         .order_by(UnitMembers.name)
     )
     result = await db.execute(stmt)
-    members = list(result.scalars().all())
-    return [serialize_member(member) for member in members]
+    members = list(result.scalars().unique().all())
+    rows = []
+    for member in members:
+        row = serialize_member(member)
+        row["unit_name"] = (
+            member.registered_user.unit_name.name
+            if member.registered_user and member.registered_user.unit_name
+            else None
+        )
+        rows.append(row)
+    return rows
 

@@ -6,7 +6,7 @@ import enum
 
 from app.common.datetime_utils import now_ist
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.common.db import Base
@@ -75,6 +75,11 @@ class ConferenceDelegate(Base):
     members_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("unit_members.id"), nullable=True, index=True
     )
+    # official = district login account or a unit member sent as an official
+    # delegate = unit member sent as a delegate
+    attendee_role: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    food_preference: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    accommodation_required: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
 
 class ConferencePayment(Base):

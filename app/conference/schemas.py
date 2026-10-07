@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -87,6 +87,21 @@ class ConferenceDelegateResponse(ConferenceDelegateBase):
     model_config = ConfigDict(from_attributes=True)
     
     id: int
+
+
+class AttendeeAdd(BaseModel):
+    """Body for a district official adding an official or delegate."""
+
+    role: Literal["official", "delegate"] = "delegate"
+    food_preference: Optional[Literal["veg", "non-veg"]] = None
+    accommodation_required: Optional[bool] = None
+
+
+class AttendeePreferenceUpdate(BaseModel):
+    """Per-person food and stay. Null means not set yet."""
+
+    food_preference: Optional[Literal["veg", "non-veg"]] = None
+    accommodation_required: Optional[bool] = None
 
 
 # Food Preference Schemas
