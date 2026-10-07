@@ -142,6 +142,12 @@ class DistrictOfficialCreate(BaseModel):
     
     conference_id: int = Field(..., gt=0)
     member_id: int = Field(..., gt=0, description="Unit member to be made official")
+    conference_official_count: Optional[int] = Field(
+        None, ge=0, description="District official slot limit (first assignment only)"
+    )
+    conference_member_count: Optional[int] = Field(
+        None, ge=0, description="District delegate slot limit (first assignment only)"
+    )
 
 
 class DistrictOfficialUpdate(BaseModel):

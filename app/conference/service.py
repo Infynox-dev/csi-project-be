@@ -227,13 +227,15 @@ def _apply_member_to_district_official(
     conference_id: int,
     conference_official_count: int,
     conference_member_count: int,
+    update_limits: bool = True,
 ) -> None:
     phone = str(member.number).strip()
     official.conference_id = conference_id
     official.first_name = member.name
     official.phone_number = phone
-    official.conference_official_count = conference_official_count
-    official.conference_member_count = conference_member_count
+    if update_limits:
+        official.conference_official_count = conference_official_count
+        official.conference_member_count = conference_member_count
     official.is_active = True
     official.hashed_password = get_password_hash(_default_official_password(phone))
 
@@ -513,14 +515,25 @@ async def add_conference_delegate_official(
         max_conference_member_count = 20
 
     default_official_count = 5
+    official_limit = (
+        data.conference_official_count
+        if data.conference_official_count is not None
+        else default_official_count
+    )
+    member_limit = (
+        data.conference_member_count
+        if data.conference_member_count is not None
+        else max_conference_member_count
+    )
 
     if existing_official:
         _apply_member_to_district_official(
             existing_official,
             member,
             conference_id=conference_id,
-            conference_official_count=default_official_count,
-            conference_member_count=max_conference_member_count,
+            conference_official_count=official_limit,
+            conference_member_count=member_limit,
+            update_limits=False,
         )
         await db.flush()
         await _ensure_official_conference_rows(
@@ -553,8 +566,8 @@ async def add_conference_delegate_official(
             official_user,
             member,
             conference_id=conference_id,
-            conference_official_count=default_official_count,
-            conference_member_count=max_conference_member_count,
+            conference_official_count=official_limit,
+            conference_member_count=member_limit,
         )
         await db.flush()
     else:
@@ -566,8 +579,8 @@ async def add_conference_delegate_official(
             phone_number=phone,
             conference_id=conference_id,
             clergy_district_id=member_district_id,
-            conference_official_count=default_official_count,
-            conference_member_count=max_conference_member_count,
+            conference_official_count=official_limit,
+            conference_member_count=member_limit,
             user_type=UserType.DISTRICT_OFFICIAL,
             hashed_password=get_password_hash(_default_official_password(phone)),
             is_active=True,
