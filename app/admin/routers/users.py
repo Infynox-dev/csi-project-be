@@ -712,7 +712,7 @@ async def list_districts_for_officials(
     Shows which districts have officials and which don't.
     """
     # Get all districts
-    stmt = select(ClergyDistrict)
+    stmt = select(ClergyDistrict).order_by(ClergyDistrict.name)
     result = await db.execute(stmt)
     districts = list(result.scalars().all())
     
