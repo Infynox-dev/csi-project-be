@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.conference.models import PaymentStatusEnum  # noqa: E402
 from app.conference.service import (  # noqa: E402
     build_conference_payment_summary,
+    district_edits_locked_from_ledger,
     has_blocking_pending,
     overall_conference_status,
     overall_status_legacy,
@@ -87,6 +88,23 @@ def test_roster_drop_creates_credit_not_new_balance():
     assert summary["balance_due"] == 0
     assert summary["payment_credit"] == 300
     assert summary["is_fully_paid"] is True
+
+
+def test_district_edits_locked_after_payment():
+    pending = _proof(status=PaymentStatusEnum.PROOF_UPLOADED, total=900)
+    ledger_pending = {"total_paid": 0, "payments": [pending]}
+    assert district_edits_locked_from_ledger(ledger_pending) is True
+
+    partial = _proof(status=PaymentStatusEnum.PAID, total=900, approved=400)
+    ledger_partial = {
+        "total_paid": 400,
+        "payments": [partial],
+    }
+    assert district_edits_locked_from_ledger(ledger_partial) is True
+
+    declined = _proof(status=PaymentStatusEnum.DECLINED, total=900)
+    ledger_clean = {"total_paid": 0, "payments": [declined]}
+    assert district_edits_locked_from_ledger(ledger_clean) is False
 
 
 def test_blocking_pending_and_stale_higher_total():

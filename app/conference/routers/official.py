@@ -227,6 +227,12 @@ async def view_delegates(
         "total_paid": ledger["total_paid"] if ledger else 0,
         "balance_due": ledger["balance_due"] if ledger else 0,
         "overall_status": ledger["overall_status"] if ledger else "not_submitted",
+        "has_blocking_pending": ledger["has_blocking_pending"] if ledger else False,
+        "edits_locked": (
+            conference_service.district_edits_locked_from_ledger(ledger)
+            if ledger
+            else False
+        ),
         "food_preference": {
             "veg_count": veg_count,
             "non_veg_count": non_veg_count,

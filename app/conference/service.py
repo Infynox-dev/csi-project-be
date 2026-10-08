@@ -750,6 +750,9 @@ async def add_conference_delegate_member(
             detail="District official has no district assigned.",
         )
 
+    await ensure_district_edits_allowed(
+        db, conference_id, official.clergy_district_id
+    )
     await ensure_district_official_rows(db, conference_id, official.clergy_district_id)
     official_count, member_count = await district_role_counts(
         db, conference_id, official.clergy_district_id
@@ -861,6 +864,7 @@ async def update_attendee_preferences(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Attendee not found",
         )
+    await ensure_district_edits_allowed(db, conference_id, district_id)
     delegate.food_preference = food_preference
     delegate.accommodation_required = accommodation_required
     await db.commit()
@@ -874,6 +878,15 @@ async def _delete_attendee_row(
     conference_id: int,
     district_id: Optional[int],
 ) -> bool:
+    if district_id is None:
+        owner = await db.execute(
+            select(CustomUser.clergy_district_id).where(
+                CustomUser.id == delegate.officials_id
+            )
+        )
+        district_id = owner.scalar_one_or_none()
+    await ensure_district_edits_allowed(db, conference_id, district_id)
+
     if delegate.members_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -967,6 +980,38 @@ def has_blocking_pending(
         if payment.total_amount is None or payment.total_amount <= fee_owed:
             return True
     return False
+
+
+DISTRICT_EDITS_LOCKED_DETAIL = (
+    "Cannot change officials, delegates, or preferences after a payment has been "
+    "submitted or approved. Contact an administrator if you need help."
+)
+
+
+def district_edits_locked_from_ledger(ledger: dict[str, Any]) -> bool:
+    """Lock roster edits after any payment proof is pending or any amount is approved."""
+    if (ledger.get("total_paid") or 0) > 0:
+        return True
+    payments = ledger.get("payments") or []
+    return bool(pending_proofs(payments))
+
+
+async def ensure_district_edits_allowed(
+    db: AsyncSession,
+    conference_id: int,
+    district_id: Optional[int],
+) -> None:
+    if district_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="District is not assigned.",
+        )
+    ledger = await get_district_payment_ledger(db, conference_id, district_id)
+    if district_edits_locked_from_ledger(ledger):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=DISTRICT_EDITS_LOCKED_DETAIL,
+        )
 
 
 async def district_delegate_counts(
@@ -1257,6 +1302,12 @@ async def set_food_preference(
     data: FoodPreferenceCreate,
 ) -> FoodPreference:
     """Set or update food preferences for a district."""
+    user_row = await db.execute(
+        select(CustomUser.clergy_district_id).where(CustomUser.id == user_id)
+    )
+    district_id = user_row.scalar_one_or_none()
+    await ensure_district_edits_allowed(db, conference_id, district_id)
+
     # Check if preference already exists
     stmt = select(FoodPreference).where(
         and_(
