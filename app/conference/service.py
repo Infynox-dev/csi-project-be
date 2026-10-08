@@ -270,6 +270,7 @@ async def _ensure_official_conference_rows(
             officials_id=official_user_id,
             members_id=None,
             attendee_role="official",
+            accommodation_required=True,
         ))
 
 
@@ -760,6 +761,9 @@ async def add_conference_delegate_member(
         member_count,
         official.conference_member_count or 0,
     )
+
+    if accommodation_required is None:
+        accommodation_required = True
 
     delegate = ConferenceDelegate(
         conference_id=conference_id,
