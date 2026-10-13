@@ -2,11 +2,13 @@
 
 from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.common.db import get_async_db
+from app.common.exporter import create_official_conference_excel
 from app.common.security import get_current_user
 from app.auth.models import CustomUser, UnitMembers, UnitName, UserType
 from app.conference.models import ConferenceDelegate, FoodPreference
@@ -375,27 +377,36 @@ async def set_food_preference(
     return preference
 
 
-@router.get("/export-excel", response_model=dict)
+@router.get("/export-excel")
 async def export_conference_data(
     current_user: CustomUser = Depends(get_current_official),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Export district conference data to Excel (placeholder for actual Excel generation)."""
+    """Download this district's conference roster and payment summary as Excel."""
     if not current_user.conference_id:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No conference assigned"
         )
-    
-    # Get conference info for this district only
-    all_info = await conference_service.get_all_conference_info(db, current_user.conference_id)
-    
-    district_name = current_user.clergy_district.name if current_user.clergy_district else None
-    district_data = all_info.get(district_name, {})
-    
-    return {
-        "message": "Excel export functionality to be implemented",
-        "district": district_name,
-        "data": district_data,
-    }
+    if not current_user.clergy_district_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="District official has no district assigned.",
+        )
+
+    officials, members = await conference_service.list_district_attendees(
+        db, current_user.conference_id, current_user.clergy_district_id
+    )
+    ledger = await conference_service.get_district_payment_ledger(
+        db, current_user.conference_id, current_user.clergy_district_id
+    )
+    await db.commit()
+    export_file = create_official_conference_excel(officials, members, ledger)
+    district_name = current_user.clergy_district.name if current_user.clergy_district else "district"
+    filename = f"conference-delegates-{district_name}.xlsx"
+    return StreamingResponse(
+        export_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 

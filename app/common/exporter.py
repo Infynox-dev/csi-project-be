@@ -592,6 +592,96 @@ def create_councilors_excel(
     return create_styled_excel(headers, rows, "Unit Councilors")
 
 
+def _gender_label(gender: Any) -> str:
+    if gender in ("M", "Male", "male"):
+        return "Male"
+    if gender in ("F", "Female", "female"):
+        return "Female"
+    return gender or ""
+
+
+def _food_label(food: Any) -> str:
+    if food == "veg":
+        return "Veg"
+    if food == "non-veg":
+        return "Non-Veg"
+    return "Not set"
+
+
+def _stay_label(stay: Any) -> str:
+    if stay is True:
+        return "Yes"
+    if stay is False:
+        return "No"
+    return "Not set"
+
+
+_PAYMENT_STATUS_LABELS = {
+    "paid": "Paid",
+    "partial": "Partially paid",
+    "pending": "Pending review",
+    "declined": "Declined",
+    "not_submitted": "Not submitted",
+}
+
+
+def create_official_conference_excel(
+    officials: List[Dict[str, Any]],
+    members: List[Dict[str, Any]],
+    ledger: Dict[str, Any],
+) -> BytesIO:
+    """Excel for one district: attendees plus that district's payment summary."""
+    headers = [
+        "Type",
+        "Name",
+        "Phone",
+        "Gender",
+        "Unit",
+        "Food Preference",
+        "Accommodation",
+        "Registration Status",
+        "Payment Status",
+        "Amount Due",
+        "Amount Paid",
+        "Balance Due",
+    ]
+
+    def person_row(kind: str, person: Dict[str, Any]) -> List[Any]:
+        return [
+            kind,
+            person.get("name") or "",
+            person.get("phone") or person.get("number") or "",
+            _gender_label(person.get("gender")),
+            person.get("unit_name") or person.get("unit") or "",
+            _food_label(person.get("food_preference")),
+            _stay_label(person.get("accommodation_required")),
+            "Registered",
+            "",
+            "",
+            "",
+            "",
+        ]
+
+    rows = [person_row("Official", person) for person in officials]
+    rows.extend(person_row("Delegate", person) for person in members)
+    status = ledger.get("overall_status")
+    rows.append([
+        "Payment",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        _PAYMENT_STATUS_LABELS.get(status, status or ""),
+        ledger.get("fee_owed", 0),
+        ledger.get("total_paid", 0),
+        ledger.get("balance_due", 0),
+    ])
+    return create_styled_excel(headers, rows, "Conference Data")
+
+
 def create_conference_excel(
     district_info: Dict[str, Dict[str, Any]],
     conference_id: int,
