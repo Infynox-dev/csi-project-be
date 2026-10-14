@@ -369,6 +369,65 @@ def _attendee_payload(
     }
 
 
+def _attendee_lists_from_delegate_rows(
+    rows: list[tuple[ConferenceDelegate, Optional[UnitMembers], Optional[str], CustomUser]],
+    phone_unit_by_district: dict[tuple[int, str], tuple[UnitMembers, Optional[str]]],
+    district_id: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    officials: list[dict[str, Any]] = []
+    delegates: list[dict[str, Any]] = []
+    for delegate, member, unit_name, owner in rows:
+        if member is None:
+            matched = phone_unit_by_district.get((district_id, owner.phone_number or ""))
+            if matched:
+                member, unit_name = matched
+            payload = _attendee_payload(
+                delegate,
+                name=owner.first_name,
+                phone=owner.phone_number,
+                gender=member.gender if member else None,
+                unit_name=unit_name,
+            )
+            payload["member_id"] = None
+            payload["removable"] = False
+        else:
+            payload = _attendee_payload(
+                delegate,
+                name=member.name,
+                phone=member.number,
+                gender=member.gender,
+                unit_name=unit_name,
+            )
+        if attendee_role_of(delegate.attendee_role, delegate.members_id) == "official":
+            officials.append(payload)
+        else:
+            delegates.append(payload)
+    return officials, delegates
+
+
+async def _phone_unit_lookup_for_district(
+    db: AsyncSession,
+    district_id: int,
+    phones: list[str],
+) -> dict[str, tuple[UnitMembers, Optional[str]]]:
+    by_phone: dict[str, tuple[UnitMembers, Optional[str]]] = {}
+    if not phones:
+        return by_phone
+    phone_rows = await db.execute(
+        select(UnitMembers, UnitName.name)
+        .join(CustomUser, UnitMembers.registered_user_id == CustomUser.id)
+        .outerjoin(UnitName, CustomUser.unit_name_id == UnitName.id)
+        .where(
+            UnitMembers.number.in_(phones),
+            CustomUser.unit_name.has(clergy_district_id=district_id),
+        )
+    )
+    for member, unit_name in phone_rows.all():
+        if member.number and member.number not in by_phone:
+            by_phone[member.number] = (member, unit_name)
+    return by_phone
+
+
 async def list_district_attendees(
     db: AsyncSession,
     conference_id: int,
@@ -393,54 +452,79 @@ async def list_district_attendees(
 
     phones = [
         owner.phone_number
-        for delegate, member, _unit, owner in rows
+        for _delegate, member, _unit, owner in rows
         if member is None and owner.phone_number
     ]
-    by_phone: dict[str, tuple[UnitMembers, Optional[str]]] = {}
-    if phones:
+    by_phone = await _phone_unit_lookup_for_district(db, district_id, phones)
+    phone_unit_by_district = {
+        (district_id, phone): match for phone, match in by_phone.items()
+    }
+    return _attendee_lists_from_delegate_rows(rows, phone_unit_by_district, district_id)
+
+
+async def _conference_attendees_by_district(
+    db: AsyncSession,
+    conference_id: int,
+) -> dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]]:
+    """All districts for one conference in two queries (delegates + phone/unit lookup). Read-only."""
+    member_owner = aliased(CustomUser)
+    result = await db.execute(
+        select(
+            ConferenceDelegate,
+            UnitMembers,
+            UnitName.name,
+            CustomUser,
+            ClergyDistrict.id,
+            ClergyDistrict.name,
+        )
+        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+        .join(ClergyDistrict, ClergyDistrict.id == CustomUser.clergy_district_id)
+        .outerjoin(UnitMembers, ConferenceDelegate.members_id == UnitMembers.id)
+        .outerjoin(member_owner, UnitMembers.registered_user_id == member_owner.id)
+        .outerjoin(UnitName, member_owner.unit_name_id == UnitName.id)
+        .where(ConferenceDelegate.conference_id == conference_id)
+        .order_by(ClergyDistrict.name, ConferenceDelegate.id)
+    )
+    rows = result.all()
+
+    district_ids: set[int] = set()
+    phones: set[str] = set()
+    for _d, member, _u, owner, district_id, _name in rows:
+        district_ids.add(district_id)
+        if member is None and owner.phone_number:
+            phones.add(owner.phone_number)
+
+    phone_unit_by_district: dict[tuple[int, str], tuple[UnitMembers, Optional[str]]] = {}
+    if phones and district_ids:
         phone_rows = await db.execute(
-            select(UnitMembers, UnitName.name)
+            select(UnitMembers, UnitName.name, CustomUser.clergy_district_id)
             .join(CustomUser, UnitMembers.registered_user_id == CustomUser.id)
             .outerjoin(UnitName, CustomUser.unit_name_id == UnitName.id)
             .where(
-                UnitMembers.number.in_(phones),
-                CustomUser.unit_name.has(clergy_district_id=district_id),
+                UnitMembers.number.in_(list(phones)),
+                CustomUser.clergy_district_id.in_(list(district_ids)),
             )
         )
-        for member, unit_name in phone_rows.all():
-            if member.number and member.number not in by_phone:
-                by_phone[member.number] = (member, unit_name)
+        for member, unit_name, dd_id in phone_rows.all():
+            if member.number and dd_id is not None:
+                key = (dd_id, member.number)
+                if key not in phone_unit_by_district:
+                    phone_unit_by_district[key] = (member, unit_name)
 
-    officials: list[dict[str, Any]] = []
-    delegates: list[dict[str, Any]] = []
-    for delegate, member, unit_name, owner in rows:
-        if member is None:
-            matched = by_phone.get(owner.phone_number or "")
-            if matched:
-                member, unit_name = matched
-            payload = _attendee_payload(
-                delegate,
-                name=owner.first_name,
-                phone=owner.phone_number,
-                gender=member.gender if member else None,
-                unit_name=unit_name,
-            )
-            # Login account row is not a picked member, even if we matched one for display.
-            payload["member_id"] = None
-            payload["removable"] = False
-        else:
-            payload = _attendee_payload(
-                delegate,
-                name=member.name,
-                phone=member.number,
-                gender=member.gender,
-                unit_name=unit_name,
-            )
-        if attendee_role_of(delegate.attendee_role, delegate.members_id) == "official":
-            officials.append(payload)
-        else:
-            delegates.append(payload)
-    return officials, delegates
+    grouped: dict[int, list[tuple[ConferenceDelegate, Optional[UnitMembers], Optional[str], CustomUser]]] = defaultdict(list)
+    district_names: dict[int, str] = {}
+    for delegate, member, unit_name, owner, district_id, district_name in rows:
+        grouped[district_id].append((delegate, member, unit_name, owner))
+        district_names[district_id] = district_name or "Unknown District"
+
+    by_name: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    for district_id in sorted(grouped.keys(), key=lambda did: district_names.get(did, "")):
+        officials, members = _attendee_lists_from_delegate_rows(
+            grouped[district_id], phone_unit_by_district, district_id
+        )
+        if officials or members:
+            by_name[district_names[district_id]] = (officials, members)
+    return by_name
 
 
 # District Official Management
@@ -1359,30 +1443,12 @@ async def get_all_conference_info(
     db: AsyncSession,
     conference_id: int,
 ) -> Dict[str, Any]:
-    """Conference roster and counts by district (reuses list_district_attendees per district)."""
-    stmt = (
-        select(CustomUser.clergy_district_id, ClergyDistrict.name)
-        .select_from(ConferenceDelegate)
-        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
-        .join(ClergyDistrict, ClergyDistrict.id == CustomUser.clergy_district_id)
-        .where(
-            ConferenceDelegate.conference_id == conference_id,
-            CustomUser.clergy_district_id.isnot(None),
-        )
-        .distinct()
-        .order_by(ClergyDistrict.name)
-    )
-    district_rows = (await db.execute(stmt)).all()
-
-    result_dict: dict[str, Any] = {}
-    for district_id, district_name in district_rows:
-        name = district_name or "Unknown District"
-        officials, members = await list_district_attendees(db, conference_id, district_id)
-        if not officials and not members:
-            continue
-        result_dict[name] = district_info_from_attendee_lists(officials, members)
-
-    return result_dict
+    """Conference roster and counts by district (batched reads, no per-district writes)."""
+    by_district = await _conference_attendees_by_district(db, conference_id)
+    return {
+        name: district_info_from_attendee_lists(officials, members)
+        for name, (officials, members) in by_district.items()
+    }
 
 
 async def conference_district_ids(
