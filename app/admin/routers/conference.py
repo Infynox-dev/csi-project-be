@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.common.db import get_async_db
-from app.common.exporter import create_payment_info_excel
+from app.common.exporter import create_conference_excel, create_payment_info_excel
 from app.common.security import get_current_user
 from app.auth.models import CustomUser, UserType, UnitMembers, ClergyDistrict
 from app.conference.models import Conference, ConferenceDelegate
@@ -114,19 +114,21 @@ async def get_conference_info(
     }
 
 
-@router.post("/{conference_id}/info/export", response_model=dict)
+@router.post("/{conference_id}/info/export")
 async def export_conference_info(
     conference_id: int,
     current_user: CustomUser = Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_db),
 ):
-    """Export conference information to Excel (placeholder)."""
+    """Export conference delegate roster by district to Excel."""
     district_info = await conference_service.get_all_conference_info(db, conference_id)
-    return {
-        "message": "Excel export functionality to be implemented",
-        "conference_id": conference_id,
-        "data": district_info,
-    }
+    export_file = create_conference_excel(district_info, conference_id)
+    filename = f"conference_info_{conference_id}.xlsx"
+    return StreamingResponse(
+        export_file,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{conference_id}/payment-info", response_model=dict)

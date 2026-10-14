@@ -1299,159 +1299,89 @@ async def set_food_preference(
 
 
 # Aggregated Data Functions
+def _gender_is_male(gender: Optional[str]) -> bool:
+    return gender == "M"
+
+
+def _gender_is_female(gender: Optional[str]) -> bool:
+    return gender in ("F", "Female", "female")
+
+
+def district_info_from_attendee_lists(
+    officials: list[dict[str, Any]],
+    members: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build admin district_info payload from list_district_attendees rows."""
+
+    def map_person(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row.get("member_id") or row["id"],
+            "name": row.get("name") or "",
+            "phone": row.get("phone") or row.get("number") or "",
+            "gender": row.get("gender"),
+            "unit": row.get("unit_name") or "",
+        }
+
+    officials_out = [map_person(row) for row in officials]
+    members_out = [map_person(row) for row in members]
+    all_rows = officials + members
+
+    veg_count = sum(1 for row in all_rows if row.get("food_preference") == "veg")
+    non_veg_count = sum(1 for row in all_rows if row.get("food_preference") == "non-veg")
+
+    count_of_male_officials = sum(1 for row in officials if _gender_is_male(row.get("gender")))
+    count_of_female_officials = sum(1 for row in officials if _gender_is_female(row.get("gender")))
+    count_of_male_members = sum(1 for row in members if _gender_is_male(row.get("gender")))
+    count_of_female_members = sum(1 for row in members if _gender_is_female(row.get("gender")))
+
+    count_of_total_male = count_of_male_officials + count_of_male_members
+    count_of_total_female = count_of_female_officials + count_of_female_members
+
+    return {
+        "officials": officials_out,
+        "members": members_out,
+        "payments": [],
+        "count_of_officials": len(officials_out),
+        "count_of_members": len(members_out),
+        "count_of_male_members": count_of_male_members,
+        "count_of_female_members": count_of_female_members,
+        "count_of_male_officials": count_of_male_officials,
+        "count_of_female_officials": count_of_female_officials,
+        "count_of_total_male": count_of_total_male,
+        "count_of_total_female": count_of_total_female,
+        "total_count": count_of_total_male + count_of_total_female,
+        "veg_count": veg_count,
+        "non_veg_count": non_veg_count,
+    }
+
+
 async def get_all_conference_info(
     db: AsyncSession,
     conference_id: int,
 ) -> Dict[str, Any]:
-    """
-    Get aggregated conference information by district.
-    
-    Args:
-        db: Database session
-        conference_id: ID of the conference
-    
-    Returns:
-        Dictionary with district-wise information
-    """
-    # Get all delegates for the conference
-    stmt = select(ConferenceDelegate).where(
-        ConferenceDelegate.conference_id == conference_id
+    """Conference roster and counts by district (reuses list_district_attendees per district)."""
+    stmt = (
+        select(CustomUser.clergy_district_id, ClergyDistrict.name)
+        .select_from(ConferenceDelegate)
+        .join(CustomUser, ConferenceDelegate.officials_id == CustomUser.id)
+        .join(ClergyDistrict, ClergyDistrict.id == CustomUser.clergy_district_id)
+        .where(
+            ConferenceDelegate.conference_id == conference_id,
+            CustomUser.clergy_district_id.isnot(None),
+        )
+        .distinct()
+        .order_by(ClergyDistrict.name)
     )
-    result = await db.execute(stmt)
-    delegates = list(result.scalars().all())
-    
-    # Aggregate by district
-    district_info = defaultdict(lambda: {
-        'officials': [],
-        'members': [],
-        'count_of_members': 0,
-        'count_of_officials': 0,
-        'count_of_male_members': 0,
-        'count_of_female_members': 0,
-        'count_of_male_officials': 0,
-        'count_of_female_officials': 0,
-        'count_of_total_male': 0,
-        'count_of_total_female': 0,
-        'total_count': 0,
-        'veg_count': 0,
-        'non_veg_count': 0,
-        'seen_officials': set(),
-    })
-    
-    for delegate in delegates:
-        # Get official with district
-        stmt = select(CustomUser).where(CustomUser.id == delegate.officials_id).options(
-            selectinload(CustomUser.clergy_district)
-        )
-        result = await db.execute(stmt)
-        official = result.scalar_one()
-        
-        district_name = official.clergy_district.name if official.clergy_district else 'Unknown District'
-        official_district_id = official.clergy_district_id
-        role = attendee_role_of(delegate.attendee_role, delegate.members_id)
-        if delegate.food_preference == "veg":
-            district_info[district_name]['veg_count'] += 1
-        elif delegate.food_preference == "non-veg":
-            district_info[district_name]['non_veg_count'] += 1
-        
-        # Add unique officials
-        if delegate.members_id is None and official.id not in district_info[district_name]['seen_officials']:
-            # Get official's unit info
-            stmt = select(UnitMembers).where(
-                and_(
-                    UnitMembers.name == official.first_name,
-                    UnitMembers.registered_user.has(
-                        CustomUser.unit_name.has(UnitName.clergy_district_id == official_district_id)
-                    )
-                )
-            ).options(
-                selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name)
-            ).limit(1)
-            result = await db.execute(stmt)
-            unit_member_official = result.scalar_one_or_none()
-            
-            if unit_member_official and unit_member_official.registered_user.unit_name:
-                district_info[district_name]['officials'].append({
-                    'name': official.first_name,
-                    'phone': official.phone_number,
-                    'id': official.id,
-                    'unit': unit_member_official.registered_user.unit_name.name,
-                    'gender': unit_member_official.gender,
-                })
-                
-                district_info[district_name]['seen_officials'].add(official.id)
-                
-                if unit_member_official.gender == 'M':
-                    district_info[district_name]['count_of_male_officials'] += 1
-                elif unit_member_official.gender in ['F', 'Female']:
-                    district_info[district_name]['count_of_female_officials'] += 1
-        
-        # Add member if present
-        if delegate.members_id and role == "official":
-            stmt = select(UnitMembers).where(UnitMembers.id == delegate.members_id).options(
-                selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name)
-            )
-            result = await db.execute(stmt)
-            member = result.scalar_one()
-            unit = (
-                member.registered_user.unit_name.name
-                if member.registered_user and member.registered_user.unit_name
-                else None
-            )
-            district_info[district_name]['officials'].append({
-                'name': member.name,
-                'phone': member.number,
-                'id': member.id,
-                'unit': unit,
-                'gender': member.gender,
-            })
-            if member.gender == 'M':
-                district_info[district_name]['count_of_male_officials'] += 1
-            elif member.gender in ['F', 'Female']:
-                district_info[district_name]['count_of_female_officials'] += 1
-        elif delegate.members_id:
-            stmt = select(UnitMembers).where(UnitMembers.id == delegate.members_id).options(
-                selectinload(UnitMembers.registered_user).selectinload(CustomUser.unit_name)
-            )
-            result = await db.execute(stmt)
-            member = result.scalar_one()
-            
-            district_info[district_name]['members'].append({
-                'name': member.name,
-                'phone': member.number,
-                'id': member.id,
-                'unit': member.registered_user.unit_name.name,
-                'gender': member.gender,
-            })
-            district_info[district_name]['count_of_members'] += 1
-            
-            if member.gender == 'M':
-                district_info[district_name]['count_of_male_members'] += 1
-            elif member.gender == 'F':
-                district_info[district_name]['count_of_female_members'] += 1
-        
-        # Update totals
-        district_info[district_name]['count_of_total_male'] = (
-            district_info[district_name]['count_of_male_officials'] +
-            district_info[district_name]['count_of_male_members']
-        )
-        district_info[district_name]['count_of_total_female'] = (
-            district_info[district_name]['count_of_female_officials'] +
-            district_info[district_name]['count_of_female_members']
-        )
-        district_info[district_name]['total_count'] = (
-            district_info[district_name]['count_of_total_male'] +
-            district_info[district_name]['count_of_total_female']
-        )
-    
-    # Convert to dict and remove seen_officials set
-    result_dict = {}
-    for district, info in district_info.items():
-        info_copy = dict(info)
-        info_copy.pop('seen_officials', None)
-        info_copy['count_of_officials'] = len(info_copy['officials'])
-        result_dict[district] = info_copy
-    
+    district_rows = (await db.execute(stmt)).all()
+
+    result_dict: dict[str, Any] = {}
+    for district_id, district_name in district_rows:
+        name = district_name or "Unknown District"
+        officials, members = await list_district_attendees(db, conference_id, district_id)
+        if not officials and not members:
+            continue
+        result_dict[name] = district_info_from_attendee_lists(officials, members)
+
     return result_dict
 
 
